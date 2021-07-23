@@ -4,3 +4,4 @@
 [submodule "external/kokkos"]
 	path = external/Kokkos
 	url = https://github.com/kokkos/kokkos.git
+	branch = develop
