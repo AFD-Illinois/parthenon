@@ -10,19 +10,28 @@
 // license in this material to reproduce, prepare derivative works, distribute copies to
 // the public, perform publicly and display publicly, and to permit others to do so.
 //========================================================================================
+#ifndef EXAMPLE_POISSON_POISSON_PACKAGE_HPP_
+#define EXAMPLE_POISSON_POISSON_PACKAGE_HPP_
 
-#ifndef PARTHENON_MPI_HPP_
-#define PARTHENON_MPI_HPP_
+#include <memory>
 
-//! \file parthenon_mpi.hpp
-//  \brief Helper file to include MPI if it's enabled and otherwise not include it. One
-//         issue was that some header files attempted to include MPI by checking #ifdef
-//         MPI_PARALLEL, but they didn't include config.hpp, which defined MPI_PARALLEL
+#include <parthenon/package.hpp>
 
-#include "config.hpp"
+namespace poisson_package {
+using namespace parthenon::package::prelude;
 
-#ifdef MPI_PARALLEL
-#include <mpi.h>
-#endif
+std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin);
+template <typename T>
+TaskStatus SetMatrixElements(T *u);
+template <typename T>
+TaskStatus SumMass(T *u, Real *sum);
+template <typename T>
+TaskStatus SumDeltaPhi(T *u, Real *sum);
+template <typename T>
+TaskStatus UpdatePhi(T *u, T *du);
+template <typename T>
+TaskStatus CheckConvergence(T *u, T *du);
+TaskStatus PrintComplete();
+} // namespace poisson_package
 
-#endif // PARTHENON_MPI_HPP_
+#endif // EXAMPLE_POISSON_POISSON_PACKAGE_HPP_
