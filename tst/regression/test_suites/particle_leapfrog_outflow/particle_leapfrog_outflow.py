@@ -16,15 +16,13 @@
 # ========================================================================================
 
 # Modules
-import math
 import numpy as np
 from numpy.lib.recfunctions import structured_to_unstructured
 
 import sys
-import os
 import utils.test_case
 
-""" To prevent littering up imported folders with .pyc files or __pycache_ folder"""
+# To prevent littering up imported folders with .pyc files or __pycache_ folder
 sys.dont_write_bytecode = True
 
 
@@ -38,26 +36,17 @@ class TestCase(utils.test_case.TestCaseAbs):
         data = np.genfromtxt("particles.csv", delimiter=",", names=True)
 
         # pick last cycle (given current parameter file)
-        final_data = data[data["ncycle"] == 184]
+        final_data = data[data["ncycle"] == 49]
         final_data.sort(order="particles_id")
 
         # see examples/particle_leapfrog/particle_leapfrog.cpp for reference data
+        # here, outflow boundaries are used such that some of the particles escape
+        # this tests code paths not otherwise present (when blocks have >0 neighbors)
         ref_data = np.array(
             [
-                [-0.1, 0.2, 0.3, 1.0, 0.0, 0.0],
-                [0.4, -0.1, 0.3, 0.0, 1.0, 0.0],
-                [-0.1, 0.3, 0.2, 0.0, 0.0, 0.5],
-                [0.0, 0.0, 0.0, -1.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0, -1.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0, 0.0, -1.0],
-                [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-                [0.0, 0.0, 0.0, -1.0, 1.0, 1.0],
-                [0.0, 0.0, 0.0, 1.0, -1.0, 1.0],
-                [0.0, 0.0, 0.0, 1.0, 1.0, -1.0],
-                [0.0, 0.0, 0.0, -1.0, -1.0, 1.0],
-                [0.0, 0.0, 0.0, 1.0, -1.0, -1.0],
-                [0.0, 0.0, 0.0, -1.0, 1.0, -1.0],
-                [0.0, 0.0, 0.0, -1.0, -1.0, -1.0],
+                [0.45, 0.2, 0.3, 1.0, 0.0, 0.0],
+                [0.4, 0.45, 0.3, 0.0, 1.0, 0.0],
+                [-0.1, 0.3, 0.475, 0.0, 0.0, 0.5],
             ]
         )
         final_data = structured_to_unstructured(
