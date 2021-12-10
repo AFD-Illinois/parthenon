@@ -7,9 +7,11 @@
 - [[PR 602]](https://github.com/lanl/parthenon/pull/602) Added tuning functionality for HDF5 output
 
 ### Changed (changing behavior/API/variables/...)
+- [[PR 604]](https://github.com/lanl/parthenon/pull/604) Allow modification of SimTime in PreStepUserWorkInLoop
 - [[PR 617]](https://github.com/lanl/parthenon/pull/617) Unify the coordinates API for MeshBlockPack and VariablePack
 
 ### Fixed (not changing behavior/API/variables/...)
+- [[PR 618]](https://github.com/lanl/parthenon/pull/618) Fix bug in variable pack performance test
 - [[PR 616]](https://github.com/lanl/parthenon/pull/609) Restore sparse base names in PackIndexMap
 - [[PR 609]](https://github.com/lanl/parthenon/pull/609) Fix bug where .final is not written if signal raised while writing regular output
 - [[PR 595]](https://github.com/lanl/parthenon/pull/595) Fix build options so that non-MPI builds cannot be paired with an MPI HDF5 lib
