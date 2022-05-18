@@ -3,7 +3,7 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2020. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -156,7 +156,7 @@ struct NeighborBlock { // aggregate and POD type. Inheritance breaks standard-la
 // TODO(felker): consider renaming/be more specific--- what kind of data/info?
 // one for each type of "BoundaryQuantity" corresponding to BoundaryVariable
 
-template <int n = 56>
+template <int n = NMAX_NEIGHBORS>
 struct BoundaryData { // aggregate and POD (even when MPI_PARALLEL is defined)
   static constexpr int kMaxNeighbor = n;
   // KGF: "nbmax" only used in bvals_var.cpp, Init/DestroyBoundaryData()
@@ -164,6 +164,7 @@ struct BoundaryData { // aggregate and POD (even when MPI_PARALLEL is defined)
   // currently, sflag[] is only used by Multgrid (send buffers are reused each stage in
   // red-black comm. pattern; need to check if they are available)
   BoundaryStatus flag[kMaxNeighbor], sflag[kMaxNeighbor];
+  BufArray1D<Real> buffers;
   BufArray1D<Real> send[kMaxNeighbor], recv[kMaxNeighbor];
 #ifdef MPI_PARALLEL
   MPI_Request req_send[kMaxNeighbor], req_recv[kMaxNeighbor];
@@ -282,6 +283,53 @@ class BoundaryVariable : public BoundaryCommunication, public BoundaryBuffer {
   void DestroyBoundaryData(BoundaryData<> &bd);
 
   // private:
+};
+
+//----------------------------------------------------------------------------------------
+// Concrete classes
+//----------------------------------------------------------------------------------------
+
+//----------------------------------------------------------------------------------------
+//! \class BoundarySwarm
+class BoundarySwarm : public BoundaryCommunication {
+ public:
+  explicit BoundarySwarm(std::weak_ptr<MeshBlock> pmb);
+  ~BoundarySwarm() = default;
+
+  std::vector<ParArrayND<int>> vars_int;
+  std::vector<ParArrayND<Real>> vars_real;
+
+  // (usuallly the std::size_t unsigned integer type)
+  std::vector<BoundaryVariable *>::size_type bswarm_index;
+
+  // BoundaryCommunication
+  void SetupPersistentMPI() final;
+  void StartReceiving(BoundaryCommSubset phase) final{};
+  void ClearBoundary(BoundaryCommSubset phase) final{};
+  void Receive(BoundaryCommSubset phase);
+  void Send(BoundaryCommSubset phase);
+
+  BoundaryData<> bd_var_;
+  std::weak_ptr<MeshBlock> pmy_block;
+  Mesh *pmy_mesh_;
+  int send_tag[NMAX_NEIGHBORS], recv_tag[NMAX_NEIGHBORS];
+  int particle_size, send_size[NMAX_NEIGHBORS], recv_size[NMAX_NEIGHBORS];
+
+ protected:
+  int nl_, nu_;
+  void InitBoundaryData(BoundaryData<> &bd);
+
+ private:
+  std::shared_ptr<MeshBlock> GetBlockPointer() {
+    if (pmy_block.expired()) {
+      PARTHENON_THROW("Invalid pointer to MeshBlock!");
+    }
+    return pmy_block.lock();
+  }
+
+#ifdef MPI_PARALLEL
+  int swarm_id_;
+#endif
 };
 
 } // namespace parthenon

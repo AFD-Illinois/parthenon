@@ -111,6 +111,8 @@ class SwarmContainer {
     return -1;
   }
 
+  void AllocateBoundaries();
+
   const SwarmVector &GetSwarmVector() const { return swarmVector_; }
   const SwarmMap &GetSwarmMap() const { return swarmMap_; }
 
@@ -131,13 +133,20 @@ class SwarmContainer {
   // Element accessor functions
   std::vector<std::shared_ptr<Swarm>> &allSwarms() { return swarmVector_; }
 
+  // Defragmentation task
+  TaskStatus Defrag(double min_occupancy);
+
   // Communication routines
-  [[deprecated("Not yet implemented")]] void SetupPersistentMPI();
+  void SetupPersistentMPI();
   [[deprecated("Not yet implemented")]] void SetBoundaries();
   [[deprecated("Not yet implemented")]] void SendBoundaryBuffers();
   [[deprecated("Not yet implemented")]] void ReceiveAndSetBoundariesWithWait();
   [[deprecated("Not yet implemented")]] bool ReceiveBoundaryBuffers();
-  [[deprecated("Not yet implemented")]] void StartReceiving(BoundaryCommSubset phase);
+  TaskStatus StartCommunication(BoundaryCommSubset phase);
+  TaskStatus Send(BoundaryCommSubset phase);
+  TaskStatus Receive(BoundaryCommSubset phase);
+  TaskStatus ResetCommunication();
+  TaskStatus FinalizeCommunicationIterative();
   [[deprecated("Not yet implemented")]] void ClearBoundary(BoundaryCommSubset phase);
 
   bool operator==(const SwarmContainer &cmp) {

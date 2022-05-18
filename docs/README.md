@@ -94,8 +94,7 @@ Initialization is mandatory and takes care of (including sanity checks)
 1. initializing MPI (if enabled)
 2. initializing Kokkos (including device setup)
 3. parsing command line arguments and parameter input file
-4. `ProcessProperties` Constructs and returns a `Properties_t` object that is often filled with runtime specified (i.e., determined from the input file) settings and parameters.  For example, this might hold an equation of state.
-5. `ProcessPackages` Constructs and returns a `Packages_t` object that contains a listing of all the variables and their metadata associated with each package.
+4. `ProcessPackages` Constructs and returns a `Packages_t` object that contains a listing of all the variables and their metadata associated with each package.
 
 Application can chose between a single and double stage initialization:
 - Single stage: `ParthenonInit(int argc, char *argv[])` includes steps 1-5 above.
@@ -114,7 +113,7 @@ be redefined by an application. Currently, these functions are, by class:
 
 #### MeshBlock
 * `InitApplicationMeshBlockData`
-* `InitUserMeshBlockData`
+* `InitMeshBlockUserData`
 * `ProblemGenerator`
 * `MeshBlockUserWorkInLoop`
 * `UserWorkBeforeOutput`
@@ -184,3 +183,11 @@ A description of mesh indexing classes [here](mesh/domain.md).
 ### Input file parameter
 
 An overview of input file parameters [here](input.md)
+
+### Global reductions
+
+Global reductions are a common need for downstream applications and can be accomplished within Parthenon's task-based execution as described [here](reductions.md).
+
+### Solvers
+
+Solvers are still a work in progress in Parthenon, but some basic building blocks are described [here](solvers.md).

@@ -36,6 +36,8 @@ ox2_bc = periodic
 nx3 = 1
 x3min = -0.5
 x3max = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
 
 <parthenon/meshblock>
 nx1 = 16
@@ -51,7 +53,8 @@ tlim = 1.e2
 integrator = rk1
 
 <Particles>
-num_particles = 1
+num_particles = 10
 particle_speed = 1.0
 rng_seed = 23487
 const_dt = 0.5
+destroy_particles_frac = 0.1
