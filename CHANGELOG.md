@@ -4,6 +4,7 @@
 
 ### Added (new features/APIs/variables/...)
 - [[PR 654]](https://github.com/lanl/parthenon/pull/654) Add option for returning FlatIdx when requested variable doesn't exist
+- [[PR 653]](https://github.com/lanl/parthenon/pull/653) Allow for multi-D particle variables
 - [[PR 622]](https://github.com/lanl/parthenon/pull/622) Extend reduction framework to support more general data types. Now uses PR 623.
 - [[PR 619]](https://github.com/lanl/parthenon/pull/619) Sort particles by cell
 - [[PR 605]](https://github.com/lanl/parthenon/pull/605) Add output triggering by signaling.
@@ -20,6 +21,8 @@
 - [[PR 617]](https://github.com/lanl/parthenon/pull/617) Unify the coordinates API for MeshBlockPack and VariablePack
 
 ### Fixed (not changing behavior/API/variables/...)
+- [[PR 680]](https://github.com/lanl/partheon/pull/680) Fix hanging compilation for sort unit test
+- [[PR 678]](https://github.com/lanl/partheon/pull/678) Fix FlatIdx packing for size-1 dimensions
 - [[PR 677]](https://github.com/lanl/partheon/pull/677) Fix restart without `SparseInfo` object
 - [[PR 670]](https://github.com/lanl/partheon/pull/670) Fix typo in `parse_value` for non-hdf5 builds
 - [[PR 656]](https://github.com/lanl/partheon/pull/656) Extend CC bvars to 5-, 6-D ParArrays
