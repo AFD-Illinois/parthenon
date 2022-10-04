@@ -46,7 +46,9 @@ void Mesh::InitUserMeshDataDefault(Mesh *, ParameterInput *) {
 
 //========================================================================================
 //! \fn void Mesh::UserWorkInLoopDefault()
-//  \brief Function called once every time step for user-defined work.
+//  \brief Dummy function that is set by default as PreStepMeshUserWorkInLoop and
+//  PostStepMeshUserWorkInLoop. One should set the latter separately (or only one) instead
+//  of redefining this function.
 //========================================================================================
 
 void Mesh::UserWorkInLoopDefault(Mesh *, ParameterInput *, SimTime const &) {
@@ -119,17 +121,7 @@ void MeshBlock::ProblemGeneratorDefault(MeshBlock *pmb, ParameterInput *pin) {
 }
 
 //========================================================================================
-//! \fn void MeshBlock::UserWorkInLoopDefault()
-//  \brief Function called once every time step for user-defined work.
-//========================================================================================
-
-void MeshBlock::UserWorkInLoopDefault() {
-  // do nothing
-  return;
-}
-
-//========================================================================================
-//! \fn void MeshBlock::UserWorkBeforeOutputDefault(ParameterInput *pin)
+//! \fn void MeshBlock::UserWorkBeforeOutputDefault(MeshBlock *pmb, ParameterInput *pin)
 //  \brief Function called before generating output files
 //========================================================================================
 

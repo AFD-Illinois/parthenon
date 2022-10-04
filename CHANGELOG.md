@@ -3,6 +3,38 @@
 ## Current develop
 
 ### Added (new features/APIs/variables/...)
+- [[PR 729]](https://github.com/lanl/parthenon/pull/729) Optional modifications to output format
+- [[PR 717]](https://github.com/lanl/parthenon/pull/717) Add ghost zone plotting capability to phdf.py and movie2d.py
+- [[PR 712]](https://github.com/lanl/parthenon/pull/712) Allow to add params from cmdline
+
+### Changed (changing behavior/API/variables/...)
+- [[PR 710]](https://github.com/lanl/parthenon/pull/710) Remove data transpose in hdf5 and restart outputs
+- [[PR 713]](https://github.com/lanl/parthenon/pull/713) Remove Coordinates stub in favor of Coordinates_t
+- [[PR 711]](https://github.com/lanl/parthenon/pull/711) Rename flux correction routines.
+- [[PR 663]](https://github.com/lanl/parthenon/pull/663) Change bvals_in_one to use sparse boundary buffers and add flux_correction in one.
+
+### Fixed (not changing behavior/API/variables/...)
+- [[PR 724]](https://github.com/lanl/parthenon/pull/724) Fix failing CI on Darwin due to differing `OutputFormatVersion` attribute in hdf5 gold files.
+- [[PR 725]](https://github.com/lanl/parthenon/pull/725) Fix improperly exited kokkos profiling region
+- [[PR 719]](https://github.com/lanl/parthenon/pull/719) Fix type mismatch in swarm boundaries when host pinned memory enabled
+- [[PR 716]](https://github.com/lanl/parthenon/pull/716) Remove unneeded assert from ParArrayND
+
+### Infrastructure (changes irrelevant to downstream codes)
+- [[PR 708]](https://github.com/lanl/parthenon/pull/708) Bump minimum version of Kokkos to 3.6
+
+### Removed (removing behavior/API/varaibles/...)
+
+
+## Release 0.7.0
+Date: 2022-08-04
+
+### Added (new features/APIs/variables/...)
+- [[PR 702]](https://github.com/lanl/parthenon/pull/702) Allow for ParArrayGeneric to accept enums
+- [[PR 694]](https://github.com/lanl/parthenon/pull/690) Add C++11 implementation of concepts lite
+- [[PR 692]](https://github.com/lanl/parthenon/pull/692) Add SparsePack machinery
+- [[PR 690]](https://github.com/lanl/parthenon/pull/690) Use power9 partition for Darwin CI
+- [[PR 689]](https://github.com/lanl/parthenon/pull/689) Add `Mesh::ProblemGenerator` (allows reductions during init)
+- [[PR 667]](https://github.com/lanl/parthenon/pull/667) Add parallel scan
 - [[PR 654]](https://github.com/lanl/parthenon/pull/654) Add option for returning FlatIdx when requested variable doesn't exist
 - [[PR 653]](https://github.com/lanl/parthenon/pull/653) Allow for multi-D particle variables
 - [[PR 622]](https://github.com/lanl/parthenon/pull/622) Extend reduction framework to support more general data types. Now uses PR 623.
@@ -12,6 +44,8 @@
 - [[PR 586]](https://github.com/lanl/parthenon/pull/586) Implement true sparse capability with automatic allocation and deallocation of sparse
 
 ### Changed (changing behavior/API/variables/...)
+- [[PR 682]](https://github.com/lanl/parthenon/pull/682) Add prolongate-in-one
+- [[PR 685]](https://github.com/lanl/parthenon/pull/685) Add `*pmb` to `MeshBlockUserWorkBeforeOutput`. Remove unused `MeshBlockUserWorkInLoop`.
 - [[PR 676]](https://github.com/lanl/parthenon/pull/662) Remove broken swarm user boundary check
 - [[PR 662]](https://github.com/lanl/parthenon/pull/662) Remove SetPrecise
 - [[PR 673]](https://github.com/lanl/parthenon/pull/673) Remove smallest meshblock case from advection_performance
@@ -21,6 +55,8 @@
 - [[PR 617]](https://github.com/lanl/parthenon/pull/617) Unify the coordinates API for MeshBlockPack and VariablePack
 
 ### Fixed (not changing behavior/API/variables/...)
+- [[PR 688]](https://github.com/lanl/parthenon/pull/688) Restore component labels for multicomponent non-vector field
+- [[PR 679]](https://github.com/lanl/parthenon/pull/679) Handle case of multidim var labeling for output
 - [[PR 680]](https://github.com/lanl/partheon/pull/680) Fix hanging compilation for sort unit test
 - [[PR 678]](https://github.com/lanl/partheon/pull/678) Fix FlatIdx packing for size-1 dimensions
 - [[PR 677]](https://github.com/lanl/partheon/pull/677) Fix restart without `SparseInfo` object
@@ -35,12 +71,16 @@
 - [[PR 595]](https://github.com/lanl/parthenon/pull/595) Fix build options so that non-MPI builds cannot be paired with an MPI HDF5 lib
 
 ### Infrastructure (changes irrelevant to downstream codes)
+- [[PR 703]](https://github.com/lanl/parthenon/pull/703) Fixed mpi/serial logic in extended CI tests
+- [[PR 700]](https://github.com/lanl/parthenon/pull/700) Moved CI testing from GitLab mirror to GitHub Actions
+- [[PR 698]](https://github.com/lanl/parthenon/pull/698) Remove matplotlib from required python libraries and make desired instead
+- [[PR 686]](https://github.com/lanl/parthenon/pull/686) Remove coverage CI stage and add key features to README
+- [[PR 681]](https://github.com/lanl/parthenon/pull/681) Refactor ParArrayNDGeneric to work with arbitrary rank Kokkos::views and hold state.
 - [[PR 669]](https://github.com/lanl/parthenon/pull/669) Bump clang-format version (and checks) to >=11.0
 - [[PR 661]](https://github.com/lanl/parthenon/pull/661) Replaced ids in MPI tags with separate `MPI_Comms` for each variable/swarm
 - [[PR 651]](https://github.com/lanl/parthenon/pull/651) Bump Catch2 version due to GCC11.2 incompatibility
 - [[PR 646]](https://github.com/lanl/parthenon/pull/646) Add machine configuration file for Stony Brook's Ookami A64FX and OLCF's Spock AMD systems.
 
-### Removed (removing behavior/API/varaibles/...)
 
 ## Release 0.6.1
 Date: 09/22/2021

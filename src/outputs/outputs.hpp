@@ -3,7 +3,7 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "basic_types.hpp"
+#include "coordinates/coordinates.hpp"
 #include "interface/mesh_data.hpp"
 #include "io_wrapper.hpp"
 #include "parthenon_arrays.hpp"
@@ -33,7 +34,6 @@ namespace parthenon {
 // forward declarations
 class Mesh;
 class ParameterInput;
-class Coordinates;
 
 //----------------------------------------------------------------------------------------
 //! \struct OutputParameters
@@ -43,6 +43,8 @@ struct OutputParameters {
   int block_number;
   std::string block_name;
   std::string file_basename;
+  int file_number_width;
+  bool file_label_final;
   std::string file_id;
   std::string variable;
   std::vector<std::string> variables;
@@ -115,7 +117,7 @@ class OutputType {
   bool SliceOutputData(MeshBlock *pmb, int dim);
   void SumOutputData(MeshBlock *pmb, int dim);
   void CalculateCartesianVector(ParArrayND<Real> &src, ParArrayND<Real> &dst,
-                                Coordinates *pco);
+                                Coordinates_t *pco);
   // following pure virtual function must be implemented in all derived classes
   virtual void WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm,
                                const SignalHandler::OutputSignal signal) = 0;

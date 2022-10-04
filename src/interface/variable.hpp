@@ -35,7 +35,6 @@
 #include <vector>
 
 #include "basic_types.hpp"
-#include "bvals/cc/bvals_cc.hpp"
 #include "defs.hpp"
 #include "interface/metadata.hpp"
 #include "parthenon_arrays.hpp"
@@ -80,14 +79,14 @@ class CellVariable {
   KOKKOS_FORCEINLINE_FUNCTION
   auto GetDim(const int i) const {
     // we can't query data.GetDim() here because data may be unallocated
-    assert(0 < i && i <= 6 && "ParArrayNDGenerics are max 6D");
+    assert(0 < i && i <= 6 && "ParArrayNDs are max 6D");
     return dims_[i - 1];
   }
 
   KOKKOS_FORCEINLINE_FUNCTION
   auto GetCoarseDim(const int i) const {
     // we can't query coarse_s.GetDim() here because it may be unallocated
-    assert(0 < i && i <= 6 && "ParArrayNDGenerics are max 6D");
+    assert(0 < i && i <= 6 && "ParArrayNDs are max 6D");
     return coarse_dims_[i - 1];
   }
 
@@ -117,9 +116,6 @@ class CellVariable {
   inline constexpr bool IsAllocated() const { return true; }
 #endif
 
-  /// Repoint vbvar's var_cc array at the current variable
-  inline void resetBoundary() { vbvar->var_cc = data; }
-
   inline bool IsSet(const MetadataFlag bit) const { return m_.IsSet(bit); }
 
   inline void Set(const MetadataFlag bit) { m_.Set(bit); }
@@ -128,9 +124,6 @@ class CellVariable {
   ParArrayND<T> data;
   ParArrayND<T> flux[4];  // used for boundary calculation
   ParArrayND<T> coarse_s; // used for sending coarse boundary calculation
-  // used in case of cell boundary communication
-  std::shared_ptr<CellCenteredBoundaryVariable> vbvar;
-  bool mpiStatus = false;
 
   int dealloc_count = 0;
 
