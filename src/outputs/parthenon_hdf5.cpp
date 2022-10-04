@@ -24,6 +24,7 @@
 #ifdef ENABLE_HDF5
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <set>
 #include <type_traits>
@@ -764,16 +765,13 @@ void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm
   // simulation, but not all variables may be allocated on all blocks
 
   auto get_vars = [=](const std::shared_ptr<MeshBlock> pmb) {
+    auto &var_vec = pmb->meshblock_data.Get()->GetCellVariableVector();
     if (restart_) {
       // get all vars with flag Independent OR restart
-      return pmb->meshblock_data.Get()
-          ->GetVariablesByFlag(
-              {parthenon::Metadata::Independent, parthenon::Metadata::Restart}, false)
-          .vars();
+      return GetAnyVariables(
+          var_vec, {parthenon::Metadata::Independent, parthenon::Metadata::Restart});
     } else {
-      return pmb->meshblock_data.Get()
-          ->GetVariablesByName(output_params.variables)
-          .vars();
+      return GetAnyVariables(var_vec, output_params.variables);
     }
   };
 
@@ -890,8 +888,8 @@ void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm
       if (!is_allocated) {
         if (vinfo.is_sparse) {
           hsize_t N = varSize * vlen;
-          memset(tmpData.data() + index, 0, N * sizeof(OutT));
-          index += N;
+          for (int i = 0; i < N; ++i)
+            tmpData[index++] = std::numeric_limits<Real>::quiet_NaN();
         } else {
           std::stringstream msg;
           msg << "### ERROR: Unable to find dense variable " << var_name << std::endl;

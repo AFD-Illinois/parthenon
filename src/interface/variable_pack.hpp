@@ -30,6 +30,7 @@
 #include "defs.hpp"
 #include "interface/metadata.hpp"
 #include "interface/variable.hpp"
+#include "interface/variable_state.hpp"
 #include "kokkos_abstraction.hpp"
 #include "mesh/domain.hpp"
 #include "utils/error_checking.hpp"
@@ -146,9 +147,11 @@ class VarListWithLabels {
            const std::unordered_set<int> &sparse_ids = {}) {
     if (!var->IsSparse() || sparse_ids.empty() ||
         (sparse_ids.count(var->GetSparseID()) > 0)) {
-      vars_.push_back(var);
-      labels_.push_back(var->label());
-      alloc_status_.push_back(var->IsAllocated());
+      //if (var->IsAllocated()) {
+        vars_.push_back(var);
+        labels_.push_back(var->label());
+        alloc_status_.push_back(var->GetAllocationStatus());
+      //}
     }
   }
 
@@ -159,7 +162,7 @@ class VarListWithLabels {
  private:
   CellVariableVector<T> vars_;
   std::vector<std::string> labels_;
-  std::vector<bool> alloc_status_;
+  std::vector<int> alloc_status_;
 };
 
 // using PackIndexMap = std::unordered_map<std::string, vpack_types::IndexPair>;
@@ -173,6 +176,9 @@ class PackIndexMap {
     const auto &key = MakeVarLabel(base_name, sparse_id);
     auto itr = map_.find(key);
     if (itr == map_.end()) {
+      for (auto &pair : map_) {
+        std::cout << pair.first << " " << pair.second.first << " " << pair.second.second << std::endl;
+      }
       PARTHENON_THROW("PackIndexMap does not have key '" + key + "'");
     }
 
@@ -240,7 +246,7 @@ class PackIndexMap {
 };
 
 template <typename T>
-using ViewOfParArrays = ParArray1D<ParArray3D<T>>;
+using ViewOfParArrays = ParArray1D<ParArray3D<T, VariableState>>;
 
 template <typename T>
 using ViewOfParArrays1D = ParArray1D<ParArray1D<T>>;
@@ -270,9 +276,9 @@ class VariablePack {
     // dims_[3]. There is one entry in allocation_status_ per VARIABLE, but dims_[3] is
     // number of COMPONENTS (e.g. for a vector variable with 3 components, there will be
     // only one entry in allocation_status_, but 3 entries in v_, sparse_ids_, etc.)
-    assert(dims_[0] > 1);
-    assert(dims_[1] > 0);
-    assert(dims_[2] > 0);
+    assert(dims_[0] > 1 || dims_[3] == 0);
+    assert(dims_[1] > 0 || dims_[3] == 0);
+    assert(dims_[2] > 0 || dims_[3] == 0);
     assert(dims_[3] == v_.extent(0));
     assert(dims_[3] == sparse_ids_.extent(0));
     assert(dims_[3] == vector_component_.extent(0));
@@ -285,6 +291,9 @@ class VariablePack {
   // Note: Device only
   KOKKOS_FORCEINLINE_FUNCTION
   bool IsAllocated(const int n) const {
+    if (n < 0 || n>= dims_[3]) {
+      printf("IsAllocated: %d %d\n", n, dims_[3]);
+    }
     assert(0 <= n && n < dims_[3]);
     return allocated_(n);
   }
@@ -305,7 +314,7 @@ class VariablePack {
 #endif
 
   KOKKOS_FORCEINLINE_FUNCTION
-  ParArray3D<T> &operator()(const int n) const {
+  ParArray3D<T, VariableState> &operator()(const int n) const {
     assert(IsAllocated(n));
     return v_(n);
   }
@@ -373,7 +382,7 @@ class VariablePack {
   int ndim_;
 
   // lives on host
-  const std::vector<bool> *alloc_status_;
+  const std::vector<int> *alloc_status_;
 };
 
 template <typename T>
@@ -455,7 +464,7 @@ class VariableFluxPack : public VariablePack<T> {
   ParArray1D<bool> flux_allocated_;
 
   // lives on host
-  const std::vector<bool> *flux_alloc_status_;
+  const std::vector<int> *flux_alloc_status_;
 };
 
 // Using std::map, not std::unordered_map because the key
@@ -469,8 +478,8 @@ template <typename PackType>
 struct PackAndIndexMap {
   PackType pack;
   PackIndexMap map;
-  std::vector<bool> alloc_status;
-  std::vector<bool> flux_alloc_status;
+  std::vector<int> alloc_status;
+  std::vector<int> flux_alloc_status;
 };
 
 template <typename T>
@@ -487,7 +496,8 @@ template <typename T>
 using MapToSwarmVariablePack = std::map<std::vector<std::string>, SwarmPackIndxPair<T>>;
 
 template <typename T>
-void AppendSparseBaseMap(const CellVariableVector<T> &vars, PackIndexMap *pvmap) {
+void AppendSparseBaseMap(const CellVariableVector<T> &vars, PackIndexMap *pvmap,
+                         const std::string &prefix="") {
   using vpack_types::IndexPair;
 
   if (pvmap != nullptr) {
@@ -503,14 +513,14 @@ void AppendSparseBaseMap(const CellVariableVector<T> &vars, PackIndexMap *pvmap)
         if (mshape.size() > 0) shape.push_back(v->GetDim(4));
         if (mshape.size() > 1) shape.push_back(v->GetDim(5));
         if (mshape.size() > 2) shape.push_back(v->GetDim(6));
-        auto &pair = pvmap->get(v->label());
+        auto &pair = pvmap->get(prefix + v->label());
         start = pair.first;
         stop = pair.second;
         auto vj = vi + 1;
         while (vj != vars.end()) {
           auto &q = *vj;
           if (q->base_name() == v->base_name()) {
-            stop = pvmap->get(q->label()).second;
+            stop = pvmap->get(prefix + q->label()).second;
             vj++;
           } else {
             break;
@@ -543,23 +553,27 @@ void FillVarView(const CellVariableVector<T> &vars, bool coarse,
   int vindex = 0;
   for (const auto &v : vars) {
     int vstart = vindex;
-    for (int k = 0; k < v->GetDim(6); k++) {
-      for (int j = 0; j < v->GetDim(5); j++) {
-        for (int i = 0; i < v->GetDim(4); i++) {
-          host_sp(vindex) = v->GetSparseID();
+    if (v->IsAllocated()) {
+      for (int k = 0; k < v->GetDim(6); k++) {
+        for (int j = 0; j < v->GetDim(5); j++) {
+          for (int i = 0; i < v->GetDim(4); i++) {
+            host_sp(vindex) = v->GetSparseID();
 
-          // returns 1 for X1DIR, 2 for X2DIR, 3 for X3DIR
-          // for tensors, returns flattened index.
-          // for scalar-objects, returns NODIR.
-          const bool is_vec = v->IsSet(Metadata::Vector) || v->IsSet(Metadata::Tensor);
-          host_vc(vindex) = is_vec ? vindex - vstart + 1 : NODIR;
+            // returns 1 for X1DIR, 2 for X2DIR, 3 for X3DIR
+            // for tensors, returns flattened index.
+            // for scalar-objects, returns NODIR.
+            const bool is_vec = v->IsSet(Metadata::Vector) || v->IsSet(Metadata::Tensor);
+            host_vc(vindex) = is_vec ? vindex - vstart + 1 : NODIR;
 
-          host_al(vindex) = v->IsAllocated();
-          if (v->IsAllocated()) {
-            host_cv(vindex) = coarse ? v->coarse_s.Get(k, j, i) : v->data.Get(k, j, i);
+            host_al(vindex) = v->IsAllocated();
+            if (v->IsAllocated()) {
+              host_cv(vindex) = coarse ? v->coarse_s.Get(k, j, i) : v->data.Get(k, j, i);
+            } else {
+              PARTHENON_FAIL("Encountered unallocated variable in FillVarView!");
+            }
+
+            vindex++;
           }
-
-          vindex++;
         }
       }
     }
@@ -639,17 +653,21 @@ void FillFluxViews(const CellVariableVector<T> &vars, const int ndim,
   int vindex = 0;
   for (const auto &v : vars) {
     int vstart = vindex;
-    for (int k = 0; k < v->GetDim(6); k++) {
-      for (int j = 0; j < v->GetDim(5); j++) {
-        for (int i = 0; i < v->GetDim(4); i++) {
-          host_al(vindex) = v->IsAllocated();
-          if (v->IsAllocated()) {
-            host_f1(vindex) = v->flux[X1DIR].Get(k, j, i);
-            if (ndim >= 2) host_f2(vindex) = v->flux[X2DIR].Get(k, j, i);
-            if (ndim >= 3) host_f3(vindex) = v->flux[X3DIR].Get(k, j, i);
-          }
+    if (v->IsAllocated()) {
+      for (int k = 0; k < v->GetDim(6); k++) {
+        for (int j = 0; j < v->GetDim(5); j++) {
+          for (int i = 0; i < v->GetDim(4); i++) {
+            host_al(vindex) = v->IsAllocated();
+            if (v->IsAllocated()) {
+              host_f1(vindex) = v->flux[X1DIR].Get(k, j, i);
+              if (ndim >= 2) host_f2(vindex) = v->flux[X2DIR].Get(k, j, i);
+              if (ndim >= 3) host_f3(vindex) = v->flux[X3DIR].Get(k, j, i);
+            } else {
+              PARTHENON_FAIL("Encountered unallocated variable in FillFluxViews!");
+            }
 
-          vindex++;
+            vindex++;
+          }
         }
       }
     }
@@ -661,11 +679,11 @@ void FillFluxViews(const CellVariableVector<T> &vars, const int ndim,
     if (mshape.size() > 2) shape.push_back(v->GetDim(6));
 
     if (pvmap != nullptr) {
-      pvmap->insert(v->label(), IndexPair(vstart, vindex - 1), shape);
+      pvmap->insert("flux::"+v->label(), IndexPair(vstart, vindex - 1), shape);
     }
   }
 
-  AppendSparseBaseMap(vars, pvmap);
+  AppendSparseBaseMap(vars, pvmap, "flux::");
 
   Kokkos::deep_copy(f1_out, host_f1);
   Kokkos::deep_copy(f2_out, host_f2);
@@ -682,7 +700,7 @@ VariableFluxPack<T> MakeFluxPack(const VarListWithLabels<T> &var_list,
   const auto &vars = var_list.vars();           // for convenience
   const auto &flux_vars = flux_var_list.vars(); // for convenience
 
-  if (vars.empty()) {
+  if (vars.empty() && flux_vars.empty()) {
     // return empty pack
     return VariableFluxPack<T>();
   }
@@ -692,13 +710,13 @@ VariableFluxPack<T> MakeFluxPack(const VarListWithLabels<T> &var_list,
   for (const auto &v : vars) {
     // we also count unallocated vars because the total size needs to be uniform across
     // meshblocks that meshblock packs will work
-    vsize += v->NumComponents();
+    if (v->IsAllocated()) vsize += v->NumComponents();
   }
   int fsize = 0;
   for (const auto &v : flux_vars) {
     // we also count unallocated vars because the total size needs to be uniform across
     // meshblocks that meshblock packs will work
-    fsize += v->NumComponents();
+    if (v->IsAllocated()) fsize += v->NumComponents();
   }
 
   // make the outer view
@@ -749,7 +767,9 @@ VariablePack<T> MakePack(const VarListWithLabels<T> &var_list, bool coarse,
   for (const auto &v : vars) {
     // we also count unallocated vars because the total size needs to be uniform across
     // meshblocks that meshblock packs will work
-    vsize += v->NumComponents();
+    if (v->IsAllocated()) {
+      vsize += v->NumComponents();
+    }
   }
 
   // make the outer view
@@ -758,18 +778,27 @@ VariablePack<T> MakePack(const VarListWithLabels<T> &var_list, bool coarse,
   ParArray1D<int> vector_component("MakePack::vector_component", vsize);
   ParArray1D<bool> allocated("MakePack::allocated", vsize);
 
-  std::array<int, 4> cv_size{0, 0, 0, 0};
-  if (vsize > 0) {
-    // get dimension from first variable, they must all be the same
-    // TODO(JL): maybe verify this?
-    const auto &var = vars.front();
-    for (int i = 0; i < 3; ++i) {
-      cv_size[i] = coarse ? var->GetCoarseDim(i + 1) : var->GetDim(i + 1);
+  std::array<int, 4> cv_size{0, 0, 0, 0};//cv_size{2, 1, 1, 0};
+  for (auto &var : vars) {
+    if (var->IsAllocated()) {
+      for (int i = 0; i < 3; ++i) {
+        cv_size[i] = coarse ? var->GetCoarseDim(i + 1) : var->GetDim(i + 1);
+      }
+      break;
     }
-    cv_size[3] = vsize;
-
-    FillVarView(vars, coarse, cv, sparse_id, vector_component, allocated, pvmap);
   }
+  cv_size[3] = vsize;
+
+  FillVarView(vars, coarse, cv, sparse_id, vector_component, allocated, pvmap);
+  //printf("Making pack of size %d: ", vsize);
+  //for (const auto &v : vars) {
+    //if (v->IsAllocated()) {
+      //printf("%s ", v->label().c_str());
+    //} else {
+      //printf("***%s*** ", v->label().c_str());
+    //}
+  //}
+  //printf("\n");
 
   return VariablePack<T>(cv, sparse_id, vector_component, allocated, cv_size);
 }

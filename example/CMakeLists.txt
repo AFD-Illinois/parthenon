@@ -21,3 +21,6 @@ add_subdirectory(particle_leapfrog)
 add_subdirectory(particle_tracers)
 add_subdirectory(poisson)
 add_subdirectory(sparse_advection)
+add_subdirectory(poisson_cg)
+add_subdirectory(poisson_nonlinear)
+

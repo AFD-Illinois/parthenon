@@ -3,7 +3,7 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -172,20 +172,29 @@ void MeshBlock::Initialize(int igid, int ilid, LogicalLocation iloc,
   // removed, which can happen after dense-on-block for sparse
   // variables is in place and after we write "prolongate-in-one,"
   // this should be only for `Metadata::Independent`.
-  const auto vars =
-      real_container
-          ->GetVariablesByFlag({Metadata::Independent, Metadata::FillGhost}, false)
-          .vars();
-  for (int n = 0; n < vars.size(); n++) {
+
+  // TODO(LFR): vars_cc_ sets what variables are communicated across
+  // ranks during remeshing, so we want to be able to explicitly flag
+  // variables that need to be communicated using `Metadata::RemeshComm`.
+  // In the future, this needs to be cleaned up since `vars_cc_` is
+  // potentially used in the load balancing calculation, but not all
+  // variables that we may want to communicate are necessarily relevant
+  // to the cost per meshblock.
+  CellVariableVector<Real> vars = GetAnyVariables(real_container->GetCellVariableVector(), 
+    {Metadata::Independent, Metadata::FillGhost, Metadata::RemeshComm});
+  for (int n = 0; n < vars.size(); ++n) {
     RegisterMeshBlockData(vars[n]);
   }
 
   if (pm->multilevel) {
+    CellVariableVector<Real> refine_vars = GetAnyVariables(
+      real_container->GetCellVariableVector(), 
+      {Metadata::Independent, Metadata::FillGhost});       
     pmr = std::make_unique<MeshRefinement>(shared_from_this(), pin);
     // This is very redundant, I think, but necessary for now
-    for (int n = 0; n < vars.size(); n++) {
+    for (int n = 0; n < refine_vars.size(); n++) {
       // These are used for doing refinement
-      pmr->AddToRefinement(vars[n]);
+      pmr->AddToRefinement(refine_vars[n]);
     }
   }
 
@@ -268,38 +277,72 @@ void MeshBlock::RegisterMeshBlockData(std::shared_ptr<FaceField> pvar_fc) {
   return;
 }
 
-void MeshBlock::AllocateSparse(std::string const &label) {
-  // first allocate variable in base stage
-  auto base_var = meshblock_data.Get()->AllocateSparse(label);
+void MeshBlock::AllocateSparse(std::string const &label, bool only_control, bool flag_uninitialized) {
+  auto &mbd = meshblock_data;
+  auto AllocateVar = [flag_uninitialized, &mbd](const std::string &l) {
+    // first allocate variable in base stage
+    auto base_var = mbd.Get()->AllocateSparse(l, flag_uninitialized);
 
-  // now allocate in all other stages
-  for (auto stage : meshblock_data.Stages()) {
-    if (stage.first == "base") {
-      // we've already done this
-      continue;
+    // now allocate in all other stages
+    for (auto stage : mbd.Stages()) {
+      if (stage.first == "base") {
+        // we've already done this
+        continue;
+      }
+
+      auto v = stage.second->GetCellVarPtr(l);
+
+      if (v->IsSet(Metadata::OneCopy)) {
+        // nothing to do, we already allocated variable on base stage, and all other
+        // stages share that variable
+        continue;
+      }
+
+      if (!v->IsAllocated()) {
+        // allocate data of target variable
+        v->AllocateData(flag_uninitialized);
+
+        // copy fluxes and boundary variable from variable on base stage
+        v->CopyFluxesAndBdryVar(base_var.get());
+      }
     }
+  };
 
-    auto v = stage.second->GetCellVarPtr(label);
+  bool cont_set = false;
+  if ((pmy_mesh != nullptr) && pmy_mesh->resolved_packages) {
+    cont_set = pmy_mesh->resolved_packages->ControlVariablesSet();
+  }
 
-    if (v->IsSet(Metadata::OneCopy)) {
-      // nothing to do, we already allocated variable on base stage, and all other
-      // stages share that variable
-      continue;
-    }
-
-    if (!v->IsAllocated()) {
-      // allocate data of target variable
-      v->AllocateData();
-
-      // copy fluxes and boundary variable from variable on base stage
-      v->CopyFluxesAndBdryVar(base_var.get());
-    }
+  if (cont_set && meshblock_data.Get()->GetCellVarPtr(label)->IsSparse()) {
+    auto clabel = label; 
+    if (!only_control) clabel = pmy_mesh->resolved_packages->GetFieldController(label);
+    const auto &var_labels = pmy_mesh->resolved_packages->GetControlledVariables(clabel);
+    for (const auto &l : var_labels)
+      AllocateVar(l);
+  } else {
+    AllocateVar(label);
   }
 }
 
 void MeshBlock::DeallocateSparse(std::string const &label) {
-  for (auto stage : meshblock_data.Stages()) {
-    stage.second->DeallocateSparse(label);
+  auto &mbd = meshblock_data;
+  auto DeallocateVar = [&mbd](const std::string &l) {
+    for (auto stage : mbd.Stages()) {
+      stage.second->DeallocateSparse(l);
+    }
+  };
+
+  bool cont_set = false;
+  if ((pmy_mesh != nullptr) && pmy_mesh->resolved_packages) {
+    cont_set = pmy_mesh->resolved_packages->ControlVariablesSet();
+  }
+
+  if (cont_set && meshblock_data.Get()->GetCellVarPtr(label)->IsSparse()) {
+    const auto &var_labels = pmy_mesh->resolved_packages->GetControlledVariables(label);
+    for (const auto &l : var_labels)
+      DeallocateVar(l);
+  } else {
+    DeallocateVar(label);
   }
 }
 

@@ -143,7 +143,6 @@ class ParArrayGeneric : public State {
   template <class... Args, REQUIRES(all_implement<integral(Args...)>::value),
             REQUIRES(Data::rank - sizeof...(Args) >= 0)>
   void NewParArrayND(Args... args, const std::string &label = "ParArrayND") {
-    assert(all_greater_than(0, args...));
     NewParArrayND(std::make_index_sequence<Data::rank - sizeof...(Args)>{}, args...,
                   label);
   }
