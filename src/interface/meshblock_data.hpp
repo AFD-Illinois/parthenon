@@ -408,7 +408,8 @@ class MeshBlockData {
     varMap_[var->label()] = var;
   }
 
-  std::shared_ptr<CellVariable<T>> AllocateSparse(std::string const &label) {
+  std::shared_ptr<CellVariable<T>> AllocateSparse(std::string const &label,
+                                                  bool flag_uninitialized = false) {
     if (!HasCellVariable(label)) {
       PARTHENON_THROW("Tried to allocate sparse variable '" + label +
                       "', but no such sparse variable exists");

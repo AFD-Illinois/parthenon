@@ -271,11 +271,6 @@ void MeshBlock::RegisterMeshBlockData(std::shared_ptr<CellVariable<Real>> pvar_c
   return;
 }
 
-void MeshBlock::RegisterMeshBlockData(std::shared_ptr<FaceField> pvar_fc) {
-  vars_fc_.push_back(pvar_fc);
-  return;
-}
-
 void MeshBlock::AllocateSparse(std::string const &label, bool only_control, bool flag_uninitialized) {
   auto &mbd = meshblock_data;
   auto AllocateVar = [flag_uninitialized, &mbd](const std::string &l) {
