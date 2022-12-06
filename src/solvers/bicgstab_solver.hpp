@@ -43,7 +43,8 @@ class BiCGStabSolver : BiCGStabCounter {
       max_iters(pkg->Param<int>("bicgstab_max_iterations")),
       check_interval(pkg->Param<int>("bicgstab_check_interval")),
       fail_flag(pkg->Param<bool>("bicgstab_abort_on_fail")),
-      warn_flag(pkg->Param<bool>("bicgstab_warn_on_fail")) {
+      warn_flag(pkg->Param<bool>("bicgstab_warn_on_fail")),
+      print_checks(pkg->Param<bool>("bicgstab_print_checks")) {
     Init(pkg);
   }
   std::vector<std::string> SolverState() const {
@@ -218,7 +219,7 @@ class BiCGStabSolver : BiCGStabCounter {
       &AllReduce<Real>::CheckReduce, &global_res);
 
     // 12. check for convergence
-    auto check = solver.SetCompletionTask(finish_global_res, &Solver_t::CheckConvergence, this, i, false);
+    auto check = solver.SetCompletionTask(finish_global_res, &Solver_t::CheckConvergence, this, i);
     tr.AddGlobalDependencies(reg.ID(), i, check);
 
     return check;
@@ -446,41 +447,46 @@ class BiCGStabSolver : BiCGStabCounter {
     return TaskStatus::complete;
   }
 
-  TaskStatus CheckConvergence(const int &i, bool report) {
+  TaskStatus CheckConvergence(const int &i) {
     if (i != 0) return TaskStatus::complete;
     bicgstab_cntr++;
     global_res.val = std::sqrt(global_res.val);
     if (bicgstab_cntr == 1) global_res0.val = std::sqrt(global_res0.val);
-    if (report) {
-      if (Globals::my_rank == 0) {
-        std::cout << parthenon::Globals::my_rank << " its= " << bicgstab_cntr
-                  << " relative res: " << global_res.val / global_res0.val << " absolute-res "
-                  << global_res.val << " relerr-tol: " << error_tol << std::endl
-                  << std::flush;
-      }
-    }
-    
-    // Update global scalars
-    rhoi_old = rhoi.val; 
-    alpha_old = rhoi.val / r0_dot_vk.val; 
-    omega_old = t_dot_s.val / t_dot_t.val;
 
-    bool converged = std::abs(global_res.val / global_res0.val) < error_tol;
-    //converged = converged && (std::abs(global_res.val) < error_tol);
-    bool stop = bicgstab_cntr == max_iters;
-    global_res.val = 0.0;
-    rhoi.val = 0.0;
-    r0_dot_vk.val = 0.0;
-    t_dot_s.val = 0.0;
-    t_dot_t.val = 0.0;
-    return converged || stop ? TaskStatus::complete : TaskStatus::iterate;
+    if (bicgstab_cntr % check_interval == 0) {
+      if (print_checks) {
+        if (Globals::my_rank == 0) {
+          std::cout << parthenon::Globals::my_rank << " its= " << bicgstab_cntr
+                    << " relative res: " << global_res.val / global_res0.val << " absolute-res "
+                    << global_res.val << " relerr-tol: " << error_tol << std::endl
+                    << std::flush;
+        }
+      }
+
+      // Update global scalars
+      rhoi_old = rhoi.val;
+      alpha_old = rhoi.val / r0_dot_vk.val;
+      omega_old = t_dot_s.val / t_dot_t.val;
+
+      bool converged = std::abs(global_res.val / global_res0.val) < error_tol;
+      //converged = converged && (std::abs(global_res.val) < error_tol);
+      bool stop = bicgstab_cntr >= max_iters;
+      global_res.val = 0.0;
+      rhoi.val = 0.0;
+      r0_dot_vk.val = 0.0;
+      t_dot_s.val = 0.0;
+      t_dot_t.val = 0.0;
+      return converged || stop ? TaskStatus::complete : TaskStatus::iterate;
+    } else {
+      return TaskStatus::iterate;
+    }
   }
  
  private: 
   Real error_tol;
   SparseMatrixAccessor sp_accessor;
   int max_iters, check_interval, bicgstab_cntr;
-  bool fail_flag, warn_flag;
+  bool fail_flag, warn_flag, print_checks;
   std::string spm_name, sol_name, rhs_name, res, res0, vk, pk, tk, solver_name;
   
   Real rhoi_old, alpha_old, omega_old;

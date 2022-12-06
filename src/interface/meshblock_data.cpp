@@ -380,7 +380,7 @@ MeshBlockData<T>::GetVariablesByFlag(const std::vector<MetadataFlag> &flags,
 
 template <typename T>
 void MeshBlockData<T>::Remove(const std::string &label) {
-  throw std::runtime_error("MeshBlockData<T>::Remove not yet implemented");
+  varMap_.erase(label);
 }
 
 template <typename T>
