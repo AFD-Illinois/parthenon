@@ -73,7 +73,8 @@ struct ReductionBase {
     // MPI communicators are reference counted by MPI, so we don't need 
     // to worry about the impact on other objects that use this communicator
     // or the rule of four
-    PARTHENON_MPI_CHECK(MPI_Comm_free(&comm));
+    // Apparently not all implementations refcount as I'm getting copious use-after/double-free (BSP)
+    //PARTHENON_MPI_CHECK(MPI_Comm_free(&comm));
 #endif
   }
 
