@@ -63,16 +63,6 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   }
   pkg->AddParam<>("profile", profile_str);
 
-  auto buffer_send_pack = pin->GetOrAddBoolean("Advection", "buffer_send_pack", false);
-  auto buffer_recv_pack = pin->GetOrAddBoolean("Advection", "buffer_recv_pack", false);
-  auto buffer_set_pack = pin->GetOrAddBoolean("Advection", "buffer_set_pack", false);
-  auto buffer_restrict_pack =
-      pin->GetOrAddBoolean("Advection", "buffer_restrict_pack", false);
-  pkg->AddParam<>("buffer_send_pack", buffer_send_pack);
-  pkg->AddParam<>("buffer_recv_pack", buffer_recv_pack);
-  pkg->AddParam<>("buffer_set_pack", buffer_set_pack);
-  pkg->AddParam<>("buffer_restrict_pack", buffer_restrict_pack);
-
   Real amp = pin->GetOrAddReal("Advection", "amp", 1e-6);
   Real vel = std::sqrt(vx * vx + vy * vy + vz * vz);
   Real ang_2 = pin->GetOrAddReal("Advection", "ang_2", -999.9);
@@ -348,8 +338,8 @@ void PostFill(MeshBlockData<Real> *rc) {
     IndexRange kb = pmb->cellbounds.GetBoundsK(IndexDomain::entire);
 
     // check that we have the sparse indices we want
-    rc->AllocSparseID("one_minus_sqrt_one_minus_advected_sq", 12);
-    rc->AllocSparseID("one_minus_sqrt_one_minus_advected_sq", 37);
+    pmb->AllocSparseID("one_minus_sqrt_one_minus_advected_sq", 12);
+    pmb->AllocSparseID("one_minus_sqrt_one_minus_advected_sq", 37);
 
     // packing in principle unnecessary/convoluted here and just done for demonstration
     std::vector<std::string> vars(
@@ -381,13 +371,13 @@ template <typename T>
 Real AdvectionHst(MeshData<Real> *md) {
   auto pmb = md->GetBlockData(0)->GetBlockPointer();
 
+  const auto ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
+  const auto jb = pmb->cellbounds.GetBoundsJ(IndexDomain::interior);
+  const auto kb = pmb->cellbounds.GetBoundsK(IndexDomain::interior);
+
   // Packing variable over MeshBlock as the function is called for MeshData, i.e., a
   // collection of blocks
   const auto &advected_pack = md->PackVariables(std::vector<std::string>{"advected"});
-
-  const auto ib = advected_pack.cellbounds.GetBoundsI(IndexDomain::interior);
-  const auto jb = advected_pack.cellbounds.GetBoundsJ(IndexDomain::interior);
-  const auto kb = advected_pack.cellbounds.GetBoundsK(IndexDomain::interior);
 
   Real result = 0.0;
   T reducer(result);
@@ -400,7 +390,7 @@ Real AdvectionHst(MeshData<Real> *md) {
   pmb->par_reduce(
       "AdvectionHst", 0, advected_pack.GetDim(5) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int b, const int k, const int j, const int i, Real &lresult) {
-        const auto &coords = advected_pack.coords(b);
+        const auto &coords = advected_pack.GetCoords(b);
         // `join` is a function of the Kokkos::ReducerConecpt that allows to use the same
         // call for different reductions
         const Real vol = volume_weighting ? coords.Volume(k, j, i) : 1.0;

@@ -20,7 +20,7 @@
 #   * For the calculate_pi example the folder is called 'calculate_pi', This
 #     folder must be added to the cmake variable TEST_DIRS as shown below.
 #
-# 2. the correct arguments to pass to the 'run_test.py' script must be specfied
+# 2. the correct arguments to pass to the 'run_test.py' script must be specified
 #   * This arguments must be added to the CMAKE variable TEST_ARGS as shown below
 #
 # 3. the number of mpi processors that should be used when testing the mpi implementation
@@ -45,7 +45,7 @@ list(APPEND TEST_DIRS advection_performance)
 list(APPEND TEST_PROCS ${NUM_MPI_PROC_TESTING})
 list(APPEND TEST_ARGS "--driver ${PROJECT_BINARY_DIR}/example/advection/advection-example \
 --driver_input ${CMAKE_CURRENT_SOURCE_DIR}/test_suites/advection_performance/parthinput.advection_performance \
---num_steps 5")
+--num_steps 4")
 list(APPEND EXTRA_TEST_LABELS "perf-reg")
 
 list(APPEND TEST_DIRS particle_leapfrog)
@@ -64,15 +64,15 @@ list(APPEND EXTRA_TEST_LABELS "")
 
 if (ENABLE_HDF5)
 
-  # h5py is needed for restart and hdff5 test
+  # h5py is needed for restart and hdf5 test
   list(APPEND REQUIRED_PYTHON_MODULES h5py)
 
   # Restart
   list(APPEND TEST_DIRS restart)
   list(APPEND TEST_PROCS ${NUM_MPI_PROC_TESTING})
-  list(APPEND TEST_ARGS "--driver ${PROJECT_BINARY_DIR}/example/advection/advection-example \
+  list(APPEND TEST_ARGS "--driver ${PROJECT_BINARY_DIR}/example/sparse_advection/sparse_advection-example \
     --driver_input ${CMAKE_CURRENT_SOURCE_DIR}/test_suites/restart/parthinput.restart \
-    --num_steps 2")
+    --num_steps 3")
   list(APPEND EXTRA_TEST_LABELS "")
 
   # Calculate pi example
@@ -116,11 +116,18 @@ if (ENABLE_HDF5)
     --driver_input ${CMAKE_CURRENT_SOURCE_DIR}/test_suites/poisson/parthinput.poisson")
   list(APPEND EXTRA_TEST_LABELS "poisson")
 
+  list(APPEND TEST_DIRS sparse_advection)
+  list(APPEND TEST_PROCS ${NUM_MPI_PROC_TESTING})
+  list(APPEND TEST_ARGS "--driver ${PROJECT_BINARY_DIR}/example/sparse_advection/sparse_advection-example \
+    --driver_input ${CMAKE_CURRENT_SOURCE_DIR}/test_suites/sparse_advection/parthinput.sparse_advection")
+  list(APPEND EXTRA_TEST_LABELS "")
+
 endif()
 
 # Any external modules that are required by python can be added to REQUIRED_PYTHON_MODULES
 # list variable, before including TestSetup.cmake.
-list(APPEND REQUIRED_PYTHON_MODULES matplotlib numpy)
+list(APPEND REQUIRED_PYTHON_MODULES numpy)
+list(APPEND DESIRED_PYTHON_MODULES matplotlib)
 
 # Include test setup functions, and check for python interpreter and modules
 #  setup_test_serial
@@ -137,6 +144,11 @@ foreach( index RANGE ${end_index})
   list(GET TEST_PROCS ${index} TEST_PROC)
   list(GET TEST_ARGS ${index} TEST_ARG)
   list(GET EXTRA_TEST_LABELS ${index} TEST_LABELS )
+
+  if (PARTHENON_DISABLE_SPARSE)
+    string(APPEND TEST_ARG " --sparse_disabled")
+  endif()
+
   setup_test_serial(${TEST_DIR} ${TEST_ARG} "${TEST_LABELS}")
   setup_test_coverage(${TEST_DIR} ${TEST_ARG} "${TEST_LABELS}")
   setup_test_parallel(${TEST_PROC} ${TEST_DIR} ${TEST_ARG} "${TEST_LABELS}")

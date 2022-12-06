@@ -17,6 +17,7 @@
 
 #include "driver/driver.hpp"
 
+#include "bvals/cc/bvals_cc_in_one.hpp"
 #include "interface/update.hpp"
 #include "mesh/mesh.hpp"
 #include "mesh/meshblock.hpp"
@@ -26,6 +27,8 @@
 #include "utils/utils.hpp"
 
 namespace parthenon {
+using SignalHandler::OutputSignal;
+
 // Declare class static variables
 Kokkos::Timer Driver::timer_main;
 Kokkos::Timer Driver::timer_cycle;
@@ -55,12 +58,14 @@ void Driver::PostExecute(DriverStatus status) {
 
 DriverStatus EvolutionDriver::Execute() {
   PreExecute();
-  InitializeBlockTimeSteps();
+  InitializeBlockTimeStepsAndBoundaries();
   SetGlobalTimeStep();
-  pouts->MakeOutputs(pmesh, pinput, &tm);
+  OutputSignal signal = OutputSignal::none;
+  pouts->MakeOutputs(pmesh, pinput, &tm, signal);
   pmesh->mbcnt = 0;
   int perf_cycle_offset =
       pinput->GetOrAddInteger("parthenon/time", "perf_cycle_offset", 0);
+
   Kokkos::Profiling::pushRegion("Driver_Main");
   while (tm.KeepGoing()) {
     if (Globals::my_rank == 0) OutputCycleDiagnostics();
@@ -84,16 +89,22 @@ DriverStatus EvolutionDriver::Execute() {
 
     timer_LBandAMR.reset();
     pmesh->LoadBalancingAndAdaptiveMeshRefinement(pinput, app_input);
-    if (pmesh->modified) InitializeBlockTimeSteps();
+    if (pmesh->modified) InitializeBlockTimeStepsAndBoundaries();
     time_LBandAMR += timer_LBandAMR.seconds();
     SetGlobalTimeStep();
-    if (tm.time < tm.tlim) // skip the final output as it happens later
-      pouts->MakeOutputs(pmesh, pinput, &tm);
 
     // check for signals
-    if (SignalHandler::CheckSignalFlags() != 0) {
-      return DriverStatus::failed;
+    signal = SignalHandler::CheckSignalFlags();
+
+    if (signal == OutputSignal::final) {
+      break;
     }
+
+    // skip the final (last) output at the end of the simulation time as it happens later
+    if (tm.time < tm.tlim) {
+      pouts->MakeOutputs(pmesh, pinput, &tm, signal);
+    }
+
     if (tm.ncycle == perf_cycle_offset) {
       pmesh->mbcnt = 0;
       timer_main.reset();
@@ -105,7 +116,7 @@ DriverStatus EvolutionDriver::Execute() {
 
   DriverStatus status = DriverStatus::complete;
 
-  pouts->MakeOutputs(pmesh, pinput, &tm);
+  pouts->MakeOutputs(pmesh, pinput, &tm, OutputSignal::final);
   PostExecute(status);
   return status;
 }
@@ -136,16 +147,19 @@ void EvolutionDriver::PostExecute(DriverStatus status) {
   Driver::PostExecute(status);
 }
 
-void EvolutionDriver::InitializeBlockTimeSteps() {
+void EvolutionDriver::InitializeBlockTimeStepsAndBoundaries() {
   // calculate the first time step using Block function
   for (auto &pmb : pmesh->block_list) {
     Update::EstimateTimestep(pmb->meshblock_data.Get().get());
   }
   // calculate the first time step using Mesh function
+  pmesh->boundary_comm_map.clear();
+  pmesh->boundary_comm_flxcor_map.clear();
   const int num_partitions = pmesh->DefaultNumPartitions();
   for (int i = 0; i < num_partitions; i++) {
     auto &mbase = pmesh->mesh_data.GetOrAdd("base", i);
     Update::EstimateTimestep(mbase.get());
+    cell_centered_bvars::BuildSparseBoundaryBuffers(mbase);
   }
 }
 

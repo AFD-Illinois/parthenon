@@ -1,9 +1,9 @@
 //========================================================================================
-// Athena++ astrophysical MHD code
-// Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
+// Parthenon performance portable AMR framework
+// Copyright(C) 2020-2022 The Parthenon collaboration
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -17,12 +17,14 @@
 
 // options for building
 #include "config.hpp"
+#include "globals.hpp"
 #include "utils/error_checking.hpp"
 
 // Only proceed if HDF5 output enabled
 #ifdef ENABLE_HDF5
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <set>
 #include <type_traits>
@@ -77,97 +79,175 @@ void HDF5WriteAttribute(const std::string &name, const std::vector<bool> &values
   HDF5WriteAttribute(name, values.size(), data.get(), location);
 }
 
+hid_t GenerateFileAccessProps() {
+#ifdef MPI_PARALLEL
+  /* set the file access template for parallel IO access */
+  hid_t acc_file = H5Pcreate(H5P_FILE_ACCESS);
+
+  /* ---------------------------------------------------------------------
+     platform dependent code goes here -- the access template must be
+     tuned for a particular filesystem blocksize.  some of these
+     numbers are guesses / experiments, others come from the file system
+     documentation.
+
+     ---------------------------------------------------------------------- */
+
+  // use collective metadata optimizations
+#if H5_VERSION_GE(1, 10, 0)
+  PARTHENON_HDF5_CHECK(H5Pset_coll_metadata_write(acc_file, true));
+  PARTHENON_HDF5_CHECK(H5Pset_all_coll_metadata_ops(acc_file, true));
+#endif
+
+  bool exists, exists2;
+
+  // Set the HDF5 format versions used when creating objects
+  // Note, introducing API calls that create objects or features that are
+  // only available to versions of the library greater than 1.8.x release will fail.
+  // For that case, the highest version value will need to be increased.
+  H5Pset_libver_bounds(acc_file, H5F_LIBVER_V18, H5F_LIBVER_V18);
+
+  // Sets the maximum size of the data sieve buffer, in bytes.
+  // The sieve_buf_size should be equal to a multiple of the disk block size
+  // Default: Disabled
+  size_t sieve_buf_size = Env::get<size_t>("H5_sieve_buf_size", 256 * KiB, exists);
+  if (exists) {
+    PARTHENON_HDF5_CHECK(H5Pset_sieve_buf_size(acc_file, sieve_buf_size));
+  }
+
+  // Sets the minimum metadata block size, in bytes.
+  // Default: Disabled
+  hsize_t meta_block_size = Env::get<hsize_t>("H5_meta_block_size", 8 * MiB, exists);
+  if (exists) {
+    PARTHENON_HDF5_CHECK(H5Pset_meta_block_size(acc_file, meta_block_size));
+  }
+
+  // Sets alignment properties of a file access property list.
+  // Choose an alignment which is a multiple of the disk block size.
+  // Default: Disabled
+  hsize_t threshold; // Threshold value. Setting to 0 forces everything to be aligned.
+  hsize_t alignment; // Alignment value.
+
+  threshold = Env::get<hsize_t>("H5_alignment_threshold", 0, exists);
+  alignment = Env::get<hsize_t>("H5_alignment_alignment", 8 * MiB, exists2);
+  if (exists || exists2) {
+    PARTHENON_HDF5_CHECK(H5Pset_alignment(acc_file, threshold, alignment));
+  }
+
+  // Defer metadata flush
+  // Default: Disabled
+  bool defer_metadata_flush = Env::get<bool>("H5_defer_metadata_flush", false, exists);
+  if (defer_metadata_flush) {
+    H5AC_cache_config_t cache_config;
+    cache_config.version = H5AC__CURR_CACHE_CONFIG_VERSION;
+    PARTHENON_HDF5_CHECK(H5Pget_mdc_config(acc_file, &cache_config));
+    cache_config.set_initial_size = 1;
+    cache_config.initial_size = 16 * MiB;
+    cache_config.evictions_enabled = 0;
+    cache_config.incr_mode = H5C_incr__off;
+    cache_config.flash_incr_mode = H5C_flash_incr__off;
+    cache_config.decr_mode = H5C_decr__off;
+    PARTHENON_HDF5_CHECK(H5Pset_mdc_config(acc_file, &cache_config));
+  }
+
+  /* create an MPI_INFO object -- on some platforms it is useful to
+     pass some information onto the underlying MPI_File_open call */
+  MPI_Info FILE_INFO_TEMPLATE;
+  PARTHENON_MPI_CHECK(MPI_Info_create(&FILE_INFO_TEMPLATE));
+
+  // Free MPI_Info on error on return or throw
+  struct MPI_InfoDeleter {
+    MPI_Info info;
+    ~MPI_InfoDeleter() { MPI_Info_free(&info); }
+  } delete_info{FILE_INFO_TEMPLATE};
+
+  // Hint specifies the manner in which the file will be accessed until the file is closed
+  const auto access_style =
+      Env::get<std::string>("MPI_access_style", "write_once", exists);
+  PARTHENON_MPI_CHECK(
+      MPI_Info_set(FILE_INFO_TEMPLATE, "access_style", access_style.c_str()));
+
+  // Specifies whether the application may benefit from collective buffering
+  // Default :: collective_buffering is disabled
+  bool collective_buffering = Env::get<bool>("MPI_collective_buffering", false, exists);
+  if (exists) {
+    PARTHENON_MPI_CHECK(MPI_Info_set(FILE_INFO_TEMPLATE, "collective_buffering", "true"));
+    // Specifies the block size to be used for collective buffering file acces
+    const auto cb_block_size =
+        Env::get<std::string>("MPI_cb_block_size", "1048576", exists);
+    PARTHENON_MPI_CHECK(
+        MPI_Info_set(FILE_INFO_TEMPLATE, "cb_block_size", cb_block_size.c_str()));
+    // Specifies the total buffer space that can be used for collective buffering on each
+    // target node, usually a multiple of cb_block_size
+    const auto cb_buffer_size =
+        Env::get<std::string>("MPI_cb_buffer_size", "4194304", exists);
+    PARTHENON_MPI_CHECK(
+        MPI_Info_set(FILE_INFO_TEMPLATE, "cb_buffer_size", cb_buffer_size.c_str()));
+  }
+
+  /* tell the HDF5 library that we want to use MPI-IO to do the writing */
+  PARTHENON_HDF5_CHECK(H5Pset_fapl_mpio(acc_file, MPI_COMM_WORLD, FILE_INFO_TEMPLATE));
+#else
+  hid_t acc_file = H5P_DEFAULT;
+#endif // ifdef MPI_PARALLEL
+  return acc_file;
+}
+
 } // namespace HDF5
 
 using namespace HDF5;
 
-// Helper struct containing some information about a variable that we can easily
-// communicate via MPI
+// Helper struct containing some information about a variable
 struct VarInfo {
-  // We need to communicate this struct via MPI. To Make our lives a bit easier, we will
-  // combine the vlen integer and the is_sparse and is_vector flags into a single int
-  // (call it info_code) and communicate that.
-  //
-  // The info_code will have the vlen in the lower 16 bits and bits 20 and 21 will encode
-  // the is_sparse and is_vector flags
-  static constexpr int max_vlen_ = (1 << 16) - 1;
-  static constexpr int sparse_flag_ = (1 << 20);
-  static constexpr int vector_flag_ = (1 << 21);
-
-  const std::string label_;
-  const std::vector<std::string> component_labels_;
-  const int vlen_;
-  const bool is_sparse_;
-  const bool is_vector_;
+  std::string label;
+  int vlen;
+  int nx6;
+  int nx5;
+  int nx4;
+  bool is_sparse;
+  bool is_vector;
+  std::vector<std::string> component_labels;
 
   VarInfo() = delete;
 
-  VarInfo(const std::string &label, const std::vector<std::string> &component_labels,
-          int vlen, bool is_sparse, bool is_vector)
-      : label_(label),
-        component_labels_(component_labels.size() > 0 ? component_labels
-                                                      : std::vector<std::string>{label}),
-        vlen_(vlen), is_sparse_(is_sparse), is_vector_(is_vector) {
-    if ((vlen_ <= 0) || (vlen_ > max_vlen_)) {
+  VarInfo(const std::string &label, const std::vector<std::string> &component_labels_,
+          int vlen, int nx6, int nx5, int nx4, bool is_sparse, bool is_vector)
+      : label(label), vlen(vlen), nx6(nx6), nx5(nx5), nx4(nx4), is_sparse(is_sparse),
+        is_vector(is_vector) {
+    if (vlen <= 0) {
       std::stringstream msg;
-      msg << "### ERROR: Got variable " << label_ << " with length " << vlen_
-          << ". vlen must be between 0 and " << max_vlen_ << std::endl;
+      msg << "### ERROR: Got variable " << label << " with length " << vlen
+          << ". vlen must be greater than 0" << std::endl;
       PARTHENON_FAIL(msg);
+    }
+
+    // Note that this logic does not subscript components without component_labels if
+    // there is only one component. Component names will be e.g.
+    //   my_scalar
+    // or
+    //   my_non-vector_set_0
+    //   my_non-vector_set_1
+    // Note that this means the subscript will be dropped for multidim quantities if their
+    // Nx6, Nx5, Nx4 are set to 1 at runtime e.g.
+    //   my_non-vector_set
+    // Similarly, if component labels are given for all components, those will be used
+    // without the prefixed label.
+    component_labels = {};
+    if (vlen == 1 || is_vector) {
+      component_labels = component_labels_.size() > 0 ? component_labels_
+                                                      : std::vector<std::string>({label});
+    } else if (component_labels_.size() == vlen) {
+      component_labels = component_labels_;
+    } else {
+      for (int i = 0; i < vlen; i++) {
+        component_labels.push_back(label + "_" + std::to_string(i));
+      }
     }
   }
 
   explicit VarInfo(const std::shared_ptr<CellVariable<Real>> &var)
-      : VarInfo(var->label(), var->metadata().getComponentLabels(), var->GetDim(4),
-                var->IsSparse(), var->IsSet(Metadata::Vector)) {}
-
-  static VarInfo Decode(const std::string &compact_labels, int info_code) {
-    // unpack compact_labels
-    const auto labels = string_utils::UnpackStrings(compact_labels, '\t');
-
-    if (labels.size() == 0) {
-      std::stringstream msg;
-      msg << "### ERROR: Got no labels" << std::endl;
-      PARTHENON_FAIL(msg);
-    }
-
-    const int vlen = info_code & max_vlen_;
-    const bool is_sparse = (info_code & sparse_flag_) > 0;
-    const bool is_vector = (info_code & vector_flag_) > 0;
-
-    // first label in compact label is the variable label, the rest are the component
-    // labels
-    return VarInfo(labels[0], std::vector<std::string>(labels.begin() + 1, labels.end()),
-                   vlen, is_sparse, is_vector);
-  }
-
-  // compactify label and component_labels into a single string for MPI communication
-  std::string get_compact_label() const {
-    // pack labels as {label, component_label[0], component_label[1], ...}
-    std::vector<std::string> labels = {label_};
-    labels.insert(labels.end(), component_labels_.begin(), component_labels_.end());
-    return string_utils::PackStrings(labels, '\t');
-  }
-
-  int get_info_code() const {
-    int code = vlen_;
-    if (is_sparse_) code += sparse_flag_;
-    if (is_vector_) code += vector_flag_;
-
-    return code;
-  }
-
-  // so we can put VarInfo into a set
-  bool operator<(const VarInfo &other) const {
-    if ((label_ == other.label_) && (vlen_ != other.vlen_)) {
-      // variables with the same label must have the same lengths
-      std::stringstream msg;
-      msg << "### ERROR: Got variable " << label_ << " with multiple different lengths"
-          << std::endl;
-      PARTHENON_FAIL(msg);
-    }
-
-    return label_ < other.label_;
-  }
+      : VarInfo(var->label(), var->metadata().getComponentLabels(), var->NumComponents(),
+                var->GetDim(6), var->GetDim(5), var->GetDim(4), var->IsSparse(),
+                var->IsSet(Metadata::Vector)) {}
 };
 
 // XDMF subroutine to write a dataitem that refers to an HDF array
@@ -196,51 +276,54 @@ static void writeXdmfArrayRef(std::ofstream &fid, const std::string &prefix,
 }
 
 static void writeXdmfSlabVariableRef(std::ofstream &fid, const std::string &name,
+                                     const std::vector<std::string> &component_labels,
                                      std::string &hdfFile, int iblock, const int &vlen,
                                      int &ndims, hsize_t *dims,
                                      const std::string &dims321, bool isVector) {
   // writes a slab reference to file
-
   std::vector<std::string> names;
   int nentries = 1;
-  int vector_size = 1;
   if (vlen == 1 || isVector) {
+    // we only make one entry, because either vlen == 1, or we write this as a vector
     names.push_back(name);
   } else {
     nentries = vlen;
     for (int i = 0; i < vlen; i++) {
-      names.push_back(name + "_" + std::to_string(i));
+      names.push_back(component_labels[i]);
     }
   }
-  if (isVector) vector_size = vlen;
+  const int vector_size = isVector ? vlen : 1;
 
   const std::string prefix = "      ";
   for (int i = 0; i < nentries; i++) {
     fid << prefix << R"(<Attribute Name=")" << names[i] << R"(" Center="Cell")";
     if (isVector) {
       fid << R"( AttributeType="Vector")"
-          << R"( Dimensions=")" << dims321 << " " << vector_size << R"(")";
+          << R"( Dimensions=")" << vector_size << " " << dims321 << R"(")";
     }
     fid << ">" << std::endl;
     fid << prefix << "  "
         << R"(<DataItem ItemType="HyperSlab" Dimensions=")" << dims321 << " "
         << vector_size << R"(">)" << std::endl;
-    // TODO(JL) 3 and 5 are literals here, careful if they change
+    // TODO(JL) 3 and 5 are literals here, careful if they change.
+    // "3" rows for START, STRIDE, and COUNT for each slab with "5" (H5_NDIM) entries.
+    // START: iblock variable(_component)  0   0   0
+    // STRIDE: 1               1           1   1   1
+    // COUNT:  1           vector_size    nx3 nx2 nx1
     fid << prefix << "    "
-        << R"(<DataItem Dimensions="3 5" NumberType="Int" Format="XML">)" << iblock
-        << " 0 0 0 " << i << " 1 1 1 1 1 1 " << dims321 << " " << vector_size
-        << "</DataItem>" << std::endl;
+        << R"(<DataItem Dimensions="3 5" NumberType="Int" Format="XML">)" << iblock << " "
+        << i << " 0 0 0 "
+        << " 1 1 1 1 1 1 " << vector_size << " " << dims321 << "</DataItem>" << std::endl;
     writeXdmfArrayRef(fid, prefix + "    ", hdfFile + ":/", name, dims, ndims, "Float",
                       8);
     fid << prefix << "  "
         << "</DataItem>" << std::endl;
     fid << prefix << "</Attribute>" << std::endl;
   }
-  return;
 }
 
 void genXDMF(std::string hdfFile, Mesh *pm, SimTime *tm, int nx1, int nx2, int nx3,
-             const std::set<VarInfo> &var_list) {
+             const std::vector<VarInfo> &var_list) {
   // using round robin generation.
   // must switch to MPIIO at some point
 
@@ -259,6 +342,7 @@ void genXDMF(std::string hdfFile, Mesh *pm, SimTime *tm, int nx1, int nx2, int n
   xdmf << R"(<?xml version="1.0" ?>)" << std::endl;
   xdmf << R"(<!DOCTYPE Xdmf SYSTEM "Xdmf.dtd">)" << std::endl;
   xdmf << R"(<Xdmf Version="3.0">)" << std::endl;
+  xdmf << R"(<Information Name="TimeVaryingMetaData" Value="True"/>)" << std::endl;
   xdmf << "  <Domain>" << std::endl;
   xdmf << R"(  <Grid Name="Mesh" GridType="Collection">)" << std::endl;
   if (tm != nullptr) {
@@ -313,15 +397,15 @@ void genXDMF(std::string hdfFile, Mesh *pm, SimTime *tm, int nx1, int nx2, int n
     xdmf << "      </Geometry>" << std::endl;
 
     // write graphics variables
-    dims[1] = nx3;
-    dims[2] = nx2;
-    dims[3] = nx1;
-    dims[4] = 1;
+    dims[1] = 1;
+    dims[2] = nx3;
+    dims[3] = nx2;
+    dims[4] = nx1;
     for (const auto &vinfo : var_list) {
-      const int vlen = vinfo.vlen_;
-      dims[4] = vlen;
-      writeXdmfSlabVariableRef(xdmf, vinfo.label_, hdfFile, ib, vlen, ndims, dims,
-                               dims321, vinfo.is_vector_);
+      const int vlen = vinfo.vlen;
+      dims[1] = vlen;
+      writeXdmfSlabVariableRef(xdmf, vinfo.label, vinfo.component_labels, hdfFile, ib,
+                               vlen, ndims, dims, dims321, vinfo.is_vector);
     }
     xdmf << "      </Grid>" << std::endl;
   }
@@ -329,15 +413,14 @@ void genXDMF(std::string hdfFile, Mesh *pm, SimTime *tm, int nx1, int nx2, int n
   xdmf << "  </Domain>" << std::endl;
   xdmf << "</Xdmf>" << std::endl;
   xdmf.close();
-
-  return;
 }
 
-void PHDF5Output::WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm) {
+void PHDF5Output::WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm,
+                                  const SignalHandler::OutputSignal signal) {
   if (output_params.single_precision_output) {
-    this->template WriteOutputFileImpl<true>(pm, pin, tm);
+    this->template WriteOutputFileImpl<true>(pm, pin, tm, signal);
   } else {
-    this->template WriteOutputFileImpl<false>(pm, pin, tm);
+    this->template WriteOutputFileImpl<false>(pm, pin, tm, signal);
   }
 }
 
@@ -346,7 +429,8 @@ void PHDF5Output::WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm) {
 //  \brief Cycles over all MeshBlocks and writes OutputData in the Parthenon HDF5 format,
 //         one file per output using parallel IO.
 template <bool WRITE_SINGLE_PRECISION>
-void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm) {
+void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm,
+                                      const SignalHandler::OutputSignal signal) {
   // writes all graphics variables to hdf file
   // HDF5 structures
   // Also writes companion xdmf file
@@ -374,61 +458,10 @@ void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm
 
   // open HDF5 file
   // Define output filename
-  auto filename = std::string(output_params.file_basename);
-  filename.append(".");
-  filename.append(output_params.file_id);
-  filename.append(".");
-  std::stringstream file_number;
-  file_number << std::setw(5) << std::setfill('0') << output_params.file_number;
-  filename.append(file_number.str());
-  filename.append(restart_ ? ".rhdf" : ".phdf");
-
-  // After file has been opened with the current number, already advance output
-  // parameters so that for restarts the file is not immediatly overwritten again.
-  output_params.file_number++;
-  output_params.next_time += output_params.dt;
-  pin->SetInteger(output_params.block_name, "file_number", output_params.file_number);
-  pin->SetReal(output_params.block_name, "next_time", output_params.next_time);
+  auto filename = GenerateFilename_(pin, tm, signal);
 
   // set file access property list
-#ifdef MPI_PARALLEL
-  /* set the file access template for parallel IO access */
-  H5P const acc_file = H5P::FromHIDCheck(H5Pcreate(H5P_FILE_ACCESS));
-
-  /* ---------------------------------------------------------------------
-     platform dependent code goes here -- the access template must be
-     tuned for a particular filesystem blocksize.  some of these
-     numbers are guesses / experiments, others come from the file system
-     documentation.
-
-     The sieve_buf_size should be equal a multiple of the disk block size
-     ---------------------------------------------------------------------- */
-
-  /* create an MPI_INFO object -- on some platforms it is useful to
-     pass some information onto the underlying MPI_File_open call */
-  MPI_Info FILE_INFO_TEMPLATE;
-  PARTHENON_MPI_CHECK(MPI_Info_create(&FILE_INFO_TEMPLATE));
-
-  // Free MPI_Info on error on return or throw
-  struct MPI_InfoDeleter {
-    MPI_Info info;
-    ~MPI_InfoDeleter() { MPI_Info_free(&info); }
-  } delete_info{FILE_INFO_TEMPLATE};
-
-  PARTHENON_HDF5_CHECK(H5Pset_sieve_buf_size(acc_file, 262144));
-  PARTHENON_HDF5_CHECK(H5Pset_alignment(acc_file, 524288, 262144));
-
-  PARTHENON_MPI_CHECK(MPI_Info_set(FILE_INFO_TEMPLATE, "access_style", "write_once"));
-  PARTHENON_MPI_CHECK(MPI_Info_set(FILE_INFO_TEMPLATE, "collective_buffering", "true"));
-  PARTHENON_MPI_CHECK(MPI_Info_set(FILE_INFO_TEMPLATE, "cb_block_size", "1048576"));
-  PARTHENON_MPI_CHECK(MPI_Info_set(FILE_INFO_TEMPLATE, "cb_buffer_size", "4194304"));
-
-  /* tell the HDF5 library that we want to use MPI-IO to do the writing */
-  PARTHENON_HDF5_CHECK(H5Pset_fapl_mpio(acc_file, MPI_COMM_WORLD, FILE_INFO_TEMPLATE));
-  PARTHENON_HDF5_CHECK(H5Pset_fapl_mpio(acc_file, MPI_COMM_WORLD, MPI_INFO_NULL));
-#else
-  hid_t const acc_file = H5P_DEFAULT;
-#endif // ifdef MPI_PARALLEL
+  H5P const acc_file = H5P::FromHIDCheck(HDF5::GenerateFileAccessProps());
 
   // now create the file
   H5F file;
@@ -460,6 +493,8 @@ void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm
   // we'll need this again at the end
   const H5G info_group = MakeGroup(file, "/Info");
   {
+    HDF5WriteAttribute("OutputFormatVersion", OUTPUT_VERSION_FORMAT, info_group);
+
     if (tm != nullptr) {
       HDF5WriteAttribute("NCycle", tm->ncycle, info_group);
       HDF5WriteAttribute("Time", tm->time, info_group);
@@ -550,12 +585,15 @@ void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm
   H5P const pl_xfer = H5P::FromHIDCheck(H5Pcreate(H5P_DATASET_XFER));
   H5P const pl_dcreate = H5P::FromHIDCheck(H5Pcreate(H5P_DATASET_CREATE));
 
+  // Never write fill values to the dataset
+  PARTHENON_HDF5_CHECK(H5Pset_fill_time(pl_dcreate, H5D_FILL_TIME_NEVER));
+
 #ifndef PARTHENON_DISABLE_HDF5_COMPRESSION
   if (output_params.hdf5_compression_level > 0) {
     // we need chunks to enable compression
-    const std::array<hsize_t, H5_NDIM> chunk_size({1, static_cast<hsize_t>(nx3),
+    const std::array<hsize_t, H5_NDIM> chunk_size({1, 1, static_cast<hsize_t>(nx3),
                                                    static_cast<hsize_t>(nx2),
-                                                   static_cast<hsize_t>(nx1), 1});
+                                                   static_cast<hsize_t>(nx1)});
     PARTHENON_HDF5_CHECK(H5Pset_chunk(pl_dcreate, H5_NDIM, chunk_size.data()));
     PARTHENON_HDF5_CHECK(
         H5Pset_deflate(pl_dcreate, std::min(9, output_params.hdf5_compression_level)));
@@ -702,123 +740,31 @@ void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm
   //   WRITING VARIABLES DATA                                                         //
   // -------------------------------------------------------------------------------- //
 
-  // first we need to get list of variables, because sparse variable ids are only
-  // allocated on some blocks, we need to look at the list of variables on each block
-  // combine these into a global list of variables
+  // All blocks have the same list of variable metadata that exist in the entire
+  // simulation, but not all variables may be allocated on all blocks
 
   auto get_vars = [=](const std::shared_ptr<MeshBlock> pmb) {
+    auto &var_vec = pmb->meshblock_data.Get()->GetCellVariableVector();
     if (restart_) {
       // get all vars with flag Independent OR restart
-      return pmb->meshblock_data.Get()
-          ->GetVariablesByFlag(
-              {parthenon::Metadata::Independent, parthenon::Metadata::Restart}, false)
-          .vars();
+      return GetAnyVariables(
+          var_vec, {parthenon::Metadata::Independent, parthenon::Metadata::Restart});
     } else {
-      return pmb->meshblock_data.Get()
-          ->GetVariablesByName(output_params.variables)
-          .vars();
+      return GetAnyVariables(var_vec, output_params.variables);
     }
   };
 
-  // local list of unique vars
-  std::set<VarInfo> all_unique_vars;
-  for (auto &pmb : pm->block_list) {
-    const auto vars = get_vars(pmb);
-    for (auto &v : vars) {
-      if (v->IsAllocated()) {
-        VarInfo vinfo(v);
-        all_unique_vars.insert(vinfo);
-      }
-    }
+  // get list of all vars, just use the first block since the list is the same for all
+  // blocks
+  std::vector<VarInfo> all_vars_info;
+  const auto vars = get_vars(pm->block_list.front());
+  for (auto &v : vars) {
+    all_vars_info.emplace_back(v);
   }
 
-#ifdef MPI_PARALLEL
-  {
-    // we need to do a global allgather to get the global list of unique variables to
-    // be written to the HDF5 file
-
-    // the label buffer contains all labels of the unique variables on this rank
-    // separated by \t, e.g.: "label0\tlabel1\tlabel2\t"
-    std::vector<std::string> compact_labels;
-    std::vector<int> code_buffer;
-
-    for (const auto &vi : all_unique_vars) {
-      compact_labels.push_back(vi.get_compact_label());
-      code_buffer.push_back(vi.get_info_code());
-    }
-
-    std::string label_buffer = string_utils::PackStrings(compact_labels, '\n');
-
-    // first we need to communicate the lengths of the label_buffer and vlen_buffer to
-    // all ranks, 2 ints per rank: first int: label_buffer length, second int:
-    // vlen_buffer length
-    std::vector<int> buffer_lengths(2 * Globals::nranks, 0);
-    buffer_lengths[Globals::my_rank * 2 + 0] = static_cast<int>(label_buffer.size());
-    buffer_lengths[Globals::my_rank * 2 + 1] = static_cast<int>(code_buffer.size());
-
-    PARTHENON_MPI_CHECK(MPI_Allgather(MPI_IN_PLACE, 2, MPI_INT, buffer_lengths.data(), 2,
-                                      MPI_INT, MPI_COMM_WORLD));
-
-    // now do an Allgatherv combining label_buffer and vlen_buffer from all ranks
-    std::vector<int> label_lengths(Globals::nranks, 0);
-    std::vector<int> label_offsets(Globals::nranks, 0);
-    std::vector<int> code_lengths(Globals::nranks, 0);
-    std::vector<int> code_offsets(Globals::nranks, 0);
-
-    int label_offset = 0;
-    int code_offset = 0;
-    for (int n = 0; n < Globals::nranks; ++n) {
-      label_offsets[n] = label_offset;
-      code_offsets[n] = code_offset;
-
-      label_lengths[n] = buffer_lengths[n * 2 + 0];
-      code_lengths[n] = buffer_lengths[n * 2 + 1];
-
-      label_offset += label_lengths[n];
-      code_offset += code_lengths[n];
-    }
-
-    // result buffers with global data
-    std::vector<char> all_labels_buffer(label_offset, '\0');
-    std::vector<int> all_codes(code_offset, 0);
-
-    // fill in our values in global buffers
-    memcpy(all_labels_buffer.data() + label_offsets[Globals::my_rank],
-           label_buffer.data(), label_buffer.size() * sizeof(char));
-    memcpy(all_codes.data() + code_offsets[Globals::my_rank], code_buffer.data(),
-           code_buffer.size() * sizeof(int));
-
-    PARTHENON_MPI_CHECK(MPI_Allgatherv(
-        MPI_IN_PLACE, label_lengths[Globals::my_rank], MPI_BYTE, all_labels_buffer.data(),
-        label_lengths.data(), label_offsets.data(), MPI_BYTE, MPI_COMM_WORLD));
-
-    PARTHENON_MPI_CHECK(MPI_Allgatherv(MPI_IN_PLACE, code_lengths[Globals::my_rank],
-                                       MPI_INT, all_codes.data(), code_lengths.data(),
-                                       code_offsets.data(), MPI_INT, MPI_COMM_WORLD));
-
-    // unpack labels
-    auto all_compact_labels = string_utils::UnpackStrings(
-        std::string(all_labels_buffer.data(), all_labels_buffer.size()), '\n');
-
-    if (all_compact_labels.size() != all_codes.size()) {
-      printf("all_compact_labels: %zu\n", all_compact_labels.size());
-      for (size_t i = 0; i < all_compact_labels.size(); ++i)
-        printf("%4zu: %s\n", i, all_compact_labels[i].c_str());
-      printf("all_codes: %zu\n", all_codes.size());
-      for (size_t i = 0; i < all_codes.size(); ++i)
-        printf("%4zu: %i\n", i, all_codes[i]);
-
-      std::stringstream msg;
-      msg << "### ERROR: all_labels and all_codes have different sizes" << std::endl;
-      PARTHENON_FAIL(msg);
-    }
-
-    // finally make list of all unique variables
-    for (size_t i = 0; i < all_compact_labels.size(); ++i) {
-      all_unique_vars.insert(VarInfo::Decode(all_compact_labels[i], all_codes[i]));
-    }
-  }
-#endif
+  // sort alphabetically
+  std::sort(all_vars_info.begin(), all_vars_info.end(),
+            [](const VarInfo &a, const VarInfo &b) { return a.label < b.label; });
 
   // We need to add information about the sparse variables to the HDF5 file, namely:
   // 1) Which variables are sparse
@@ -837,10 +783,10 @@ void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm
 
   std::vector<std::string> sparse_names;
   std::unordered_map<std::string, size_t> sparse_field_idx;
-  for (auto &vinfo : all_unique_vars) {
-    if (vinfo.is_sparse_) {
-      sparse_field_idx.insert({vinfo.label_, sparse_names.size()});
-      sparse_names.push_back(vinfo.label_);
+  for (auto &vinfo : all_vars_info) {
+    if (vinfo.is_sparse) {
+      sparse_field_idx.insert({vinfo.label, sparse_names.size()});
+      sparse_names.push_back(vinfo.label);
     }
   }
 
@@ -852,8 +798,8 @@ void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm
   // allocate space for largest size variable
   const hsize_t varSize = nx3 * nx2 * nx1;
   int vlen_max = 0;
-  for (auto &vinfo : all_unique_vars) {
-    vlen_max = std::max(vlen_max, vinfo.vlen_);
+  for (auto &vinfo : all_vars_info) {
+    vlen_max = std::max(vlen_max, vinfo.vlen);
   }
 
   using OutT = typename std::conditional<WRITE_SINGLE_PRECISION, float, Real>::type;
@@ -862,99 +808,96 @@ void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm
   // create persistent spaces
   local_count[0] = num_blocks_local;
   global_count[0] = max_blocks_global;
-  local_count[1] = global_count[1] = nx3;
-  local_count[2] = global_count[2] = nx2;
-  local_count[3] = global_count[3] = nx1;
+  local_count[2] = global_count[2] = nx3;
+  local_count[3] = global_count[3] = nx2;
+  local_count[4] = global_count[4] = nx1;
 
   // for each variable we write
-  for (auto &vinfo : all_unique_vars) {
+  for (auto &vinfo : all_vars_info) {
     // not really necessary, but doesn't hurt
     memset(tmpData.data(), 0, tmpData.size() * sizeof(OutT));
 
-    const std::string var_name = vinfo.label_;
-    const hsize_t vlen = vinfo.vlen_;
+    const std::string var_name = vinfo.label;
+    const hsize_t vlen = vinfo.vlen;
+    const hsize_t nx6 = vinfo.nx6;
+    const hsize_t nx5 = vinfo.nx5;
+    const hsize_t nx4 = vinfo.nx4;
 
-    local_count[4] = global_count[4] = vlen;
+    local_count[1] = global_count[1] = vlen;
 
     // load up data
     hsize_t index = 0;
-    bool found_any = false;
 
     // for each local mesh block
     for (size_t b_idx = 0; b_idx < num_blocks_local; ++b_idx) {
       const auto &pmb = pm->block_list[b_idx];
-      bool found = false;
+      bool is_allocated = false;
 
       // for each variable that this local meshblock actually has
       const auto vars = get_vars(pmb);
       for (auto &v : vars) {
-        // Note index l transposed to interior
+        // For reference, if we update the logic here, there's also
+        // a similar block in parthenon_manager.cpp
         if (v->IsAllocated() && (var_name == v->label())) {
           auto v_h = v->data.GetHostMirrorAndCopy();
-          for (int k = out_kb.s; k <= out_kb.e; ++k) {
-            for (int j = out_jb.s; j <= out_jb.e; ++j) {
-              for (int i = out_ib.s; i <= out_ib.e; ++i) {
-                for (int l = 0; l < vlen; ++l) {
-                  tmpData[index++] = static_cast<OutT>(v_h(l, k, j, i));
+          for (int t = 0; t < nx6; ++t) {
+            for (int u = 0; u < nx5; ++u) {
+              for (int v = 0; v < nx4; ++v) {
+                for (int k = out_kb.s; k <= out_kb.e; ++k) {
+                  for (int j = out_jb.s; j <= out_jb.e; ++j) {
+                    for (int i = out_ib.s; i <= out_ib.e; ++i) {
+                      tmpData[index++] = static_cast<OutT>(v_h(t, u, v, k, j, i));
+                    }
+                  }
                 }
               }
             }
           }
 
-          found = true;
+          is_allocated = true;
           break;
         }
       }
 
-      if (vinfo.is_sparse_) {
-        size_t sparse_idx = sparse_field_idx.at(vinfo.label_);
-        sparse_allocated[b_idx * num_sparse + sparse_idx] = found;
+      if (vinfo.is_sparse) {
+        size_t sparse_idx = sparse_field_idx.at(vinfo.label);
+        sparse_allocated[b_idx * num_sparse + sparse_idx] = is_allocated;
       }
 
-      if (!found) {
-        if (vinfo.is_sparse_) {
+      if (!is_allocated) {
+        if (vinfo.is_sparse) {
           hsize_t N = varSize * vlen;
-          memset(tmpData.data() + index, 0, N * sizeof(OutT));
-          index += N;
+          for (int i = 0; i < N; ++i)
+            tmpData[index++] = std::numeric_limits<Real>::quiet_NaN();
         } else {
           std::stringstream msg;
           msg << "### ERROR: Unable to find dense variable " << var_name << std::endl;
           PARTHENON_FAIL(msg);
         }
-      } else {
-        found_any = true;
       }
     }
 
-    // If found_any is true, it means that at least one local block has data for the
-    // current variable writing, so we write the tmpData buffer to the HDF5 file. Note,
-    // the tmpData buffer may contain some 0's for the local blocks that don't have this
-    // variable. It's ok to write these 0's because compression will take care of them.
-    // Otherwise, if found_any is false, then none of the local blocks have data for this
-    // variable, so we don't need to write a buffer of all 0's.
-    if (found_any) {
-      // write data to file
-      HDF5WriteND(file, var_name, tmpData.data(), H5_NDIM, p_loc_offset, p_loc_cnt,
-                  p_glob_cnt, pl_xfer, pl_dcreate);
-    }
+    // write data to file
+    HDF5WriteND(file, var_name, tmpData.data(), H5_NDIM, p_loc_offset, p_loc_cnt,
+                p_glob_cnt, pl_xfer, pl_dcreate);
   }
 
   // names of variables
   std::vector<std::string> var_names;
-  var_names.reserve(all_unique_vars.size());
+  var_names.reserve(all_vars_info.size());
 
   // number of components within each dataset
   std::vector<size_t> num_components;
-  num_components.reserve(all_unique_vars.size());
+  num_components.reserve(all_vars_info.size());
 
   // names of components within each dataset
   std::vector<std::string> component_names;
-  component_names.reserve(all_unique_vars.size()); // may be larger
+  component_names.reserve(all_vars_info.size()); // may be larger
 
-  for (const auto &vi : all_unique_vars) {
-    var_names.push_back(vi.label_);
+  for (const auto &vi : all_vars_info) {
+    var_names.push_back(vi.label);
 
-    const auto &component_labels = vi.component_labels_;
+    const auto &component_labels = vi.component_labels;
     PARTHENON_REQUIRE_THROWS(component_labels.size() > 0, "Got 0 component labels");
 
     num_components.push_back(component_labels.size());
@@ -984,16 +927,48 @@ void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm
     HDF5WriteAttribute("SparseFields", names, dset);
   } // SparseInfo and SparseFields sections
 
-  if (!restart_) {
-    // generate XDMF companion file
-    genXDMF(filename, pm, tm, nx1, nx2, nx3, all_unique_vars);
+  // generate XDMF companion file
+  genXDMF(filename, pm, tm, nx1, nx2, nx3, all_vars_info);
+}
+
+std::string PHDF5Output::GenerateFilename_(ParameterInput *pin, SimTime *tm,
+                                           const SignalHandler::OutputSignal signal) {
+  auto filename = std::string(output_params.file_basename);
+  filename.append(".");
+  filename.append(output_params.file_id);
+  filename.append(".");
+  if (signal == SignalHandler::OutputSignal::now) {
+    filename.append("now");
+  } else if (signal == SignalHandler::OutputSignal::final &&
+             output_params.file_label_final) {
+    filename.append("final");
+    // default time based data dump
+  } else {
+    std::stringstream file_number;
+    file_number << std::setw(output_params.file_number_width) << std::setfill('0')
+                << output_params.file_number;
+    filename.append(file_number.str());
   }
+  filename.append(restart_ ? ".rhdf" : ".phdf");
+
+  if (signal == SignalHandler::OutputSignal::none) {
+    // After file has been opened with the current number, already advance output
+    // parameters so that for restarts the file is not immediatly overwritten again.
+    // Only applies to default time-based data dumps, so that writing "now" and "final"
+    // outputs does not change the desired output numbering.
+    output_params.file_number++;
+    output_params.next_time += output_params.dt;
+    pin->SetInteger(output_params.block_name, "file_number", output_params.file_number);
+    pin->SetReal(output_params.block_name, "next_time", output_params.next_time);
+  }
+  return filename;
 }
 
 // explicit template instantiation
-template void PHDF5Output::WriteOutputFileImpl<false>(Mesh *, ParameterInput *,
-                                                      SimTime *);
-template void PHDF5Output::WriteOutputFileImpl<true>(Mesh *, ParameterInput *, SimTime *);
+template void PHDF5Output::WriteOutputFileImpl<false>(Mesh *, ParameterInput *, SimTime *,
+                                                      SignalHandler::OutputSignal);
+template void PHDF5Output::WriteOutputFileImpl<true>(Mesh *, ParameterInput *, SimTime *,
+                                                     SignalHandler::OutputSignal);
 
 } // namespace parthenon
 

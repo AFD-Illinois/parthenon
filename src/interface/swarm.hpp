@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -83,12 +83,11 @@ class Swarm {
   void SetBlockPointer(std::weak_ptr<MeshBlock> pmb) { pmy_block = pmb; }
 
   /// Make a new Swarm based on an existing one
-  std::shared_ptr<Swarm> AllocateCopy(const bool alloc_separate_fluxes_and_bvar = false,
-                                      MeshBlock *pmb = nullptr);
+  std::shared_ptr<Swarm> AllocateCopy(MeshBlock *pmb);
 
   /// Add variable of given type to swarm
   template <class T>
-  void Add_(const std::string &label);
+  void Add_(const std::string &label, const Metadata &m);
 
   /// Add variable to swarm
   void Add(const std::string &label, const Metadata &metadata);
@@ -155,22 +154,33 @@ class Swarm {
   void RemoveMarkedParticles();
 
   /// Open up memory for new empty particles, return a mask to these particles
-  ParArrayND<bool> AddEmptyParticles(const int num_to_add, ParArrayND<int> &new_indices);
+  ParArray1D<bool> AddEmptyParticles(const int num_to_add, ParArrayND<int> &new_indices);
 
   /// Defragment the list by moving active particles so they are contiguous in
   /// memory
   void Defrag();
 
+  /// Sort particle list by cell each particle belongs to, according to 1D cell
+  /// index (i + nx*(j + ny*k))
+  void SortParticlesByCell();
+
   // used in case of swarm boundary communication
   void SetupPersistentMPI();
   std::shared_ptr<BoundarySwarm> vbswarm;
-  bool mpiStatus;
   void AllocateComms(std::weak_ptr<MeshBlock> wpmb);
 
   // This is the particle data size for indexing boundary data buffers, for which
   // integers are cast as Reals.
   int GetParticleDataSize() {
-    return std::get<0>(Vectors_).size() + std::get<1>(Vectors_).size();
+    int size = 0;
+    for (auto &v : std::get<0>(Vectors_)) {
+      size += v->NumComponents();
+    }
+    for (auto &v : std::get<1>(Vectors_)) {
+      size += v->NumComponents();
+    }
+
+    return size;
   }
 
   void Send(BoundaryCommSubset phase);
@@ -180,9 +190,6 @@ class Swarm {
   void ResetCommunication();
 
   bool FinalizeCommunicationIterative();
-
-  template <class T>
-  SwarmVariablePack<T> PackAllVariables(PackIndexMap &vmap);
 
   template <class T>
   SwarmVariablePack<T> PackVariables(const std::vector<std::string> &name,
@@ -206,6 +213,11 @@ class Swarm {
  private:
   template <class T>
   vpack_types::SwarmVarList<T> MakeVarListAll_();
+  template <class T>
+  vpack_types::SwarmVarList<T> MakeVarList_(const std::vector<std::string> &names);
+
+  template <class BOutflow, class BPeriodic, int iFace>
+  void AllocateBoundariesImpl_(MeshBlock *pmb);
 
   void SetNeighborIndices1D_();
   void SetNeighborIndices2D_();
@@ -216,14 +228,17 @@ class Swarm {
   void UpdateNeighborBufferReceiveIndices_(ParArrayND<int> &neighbor_index,
                                            ParArrayND<int> &buffer_index);
 
+  template <class T>
+  SwarmVariablePack<T> PackAllVariables_(PackIndexMap &vmap);
+
   int debug = 0;
   std::weak_ptr<MeshBlock> pmy_block;
 
-  int nmax_pool_;
   int max_active_index_ = 0;
   int num_active_ = 0;
-  Metadata m_;
   std::string label_;
+  Metadata m_;
+  int nmax_pool_;
   std::string info_;
   std::shared_ptr<ParArrayND<PARTICLE_STATUS>> pstatus_;
   std::tuple<ParticleVariableVector<int>, ParticleVariableVector<Real>> Vectors_;
@@ -231,13 +246,13 @@ class Swarm {
   std::tuple<MapToParticle<int>, MapToParticle<Real>> Maps_;
 
   std::list<int> free_indices_;
-  ParticleVariable<bool> mask_;
-  ParticleVariable<bool> marked_for_removal_;
-  ParticleVariable<int> neighbor_send_index_; // -1 means no send
+  ParArray1D<bool> mask_;
+  ParArray1D<bool> marked_for_removal_;
+  ParArrayND<int> blockIndex_; // Neighbor index for each particle. -1 for current block.
   ParArrayND<int> neighborIndices_; // Indexing of vbvar's neighbor array. -1 for same.
                                     // k,j indices unused in 3D&2D, 2D, respectively
-  ParArrayND<int> blockIndex_; // Neighbor index for each particle. -1 for current block.
 
+  constexpr static int no_block_ = -2;
   constexpr static int this_block_ = -1;
   constexpr static int unset_index_ = -1;
 
@@ -248,7 +263,29 @@ class Swarm {
   int total_received_particles_;
 
   ParArrayND<int> neighbor_buffer_index_; // Map from neighbor index to neighbor bufid
+
+  ParArray1D<SwarmKey>
+      cellSorted_; // 1D per-cell sorted array of key-value swarm memory indices
+
+  ParArrayND<int> cellSortedBegin_; // Per-cell array of starting indices in cell_sorted_
+
+  ParArrayND<int> cellSortedNumber_; // Per-cell array of number of particles in each cell
+
+ public:
+  bool mpiStatus;
 };
+
+template <class T>
+inline vpack_types::SwarmVarList<T>
+Swarm::MakeVarList_(const std::vector<std::string> &names) {
+  vpack_types::SwarmVarList<T> vars;
+  auto variables = std::get<getType<T>()>(Maps_);
+
+  for (auto name : names) {
+    vars.push_front(variables[name]);
+  }
+  return vars;
+}
 
 template <class T>
 inline vpack_types::SwarmVarList<T> Swarm::MakeVarListAll_() {
@@ -266,7 +303,7 @@ inline vpack_types::SwarmVarList<T> Swarm::MakeVarListAll_() {
 template <class T>
 inline SwarmVariablePack<T> Swarm::PackVariables(const std::vector<std::string> &names,
                                                  PackIndexMap &vmap) {
-  vpack_types::SwarmVarList<T> vars = MakeVarListAll_<T>();
+  vpack_types::SwarmVarList<T> vars = MakeVarList_<T>(names);
   auto pack = MakeSwarmPack<T>(vars, &vmap);
   SwarmPackIndxPair<T> value;
   value.pack = pack;
@@ -275,18 +312,20 @@ inline SwarmVariablePack<T> Swarm::PackVariables(const std::vector<std::string> 
 }
 
 template <class T>
-inline SwarmVariablePack<T> Swarm::PackAllVariables(PackIndexMap &vmap) {
+inline SwarmVariablePack<T> Swarm::PackAllVariables_(PackIndexMap &vmap) {
   std::vector<std::string> names;
   names.reserve(std::get<getType<T>()>(Vectors_).size());
   for (const auto &v : std::get<getType<T>()>(Vectors_)) {
     names.push_back(v->label());
   }
-  return PackVariables<T>(names, vmap);
+
+  auto ret = PackVariables<T>(names, vmap);
+  return ret;
 }
 
 template <class T>
-inline void Swarm::Add_(const std::string &label) {
-  ParticleVariable<T> pvar(label, nmax_pool_, m_);
+inline void Swarm::Add_(const std::string &label, const Metadata &m) {
+  ParticleVariable<T> pvar(label, nmax_pool_, m);
   auto var = std::make_shared<ParticleVariable<T>>(pvar);
 
   std::get<getType<T>()>(Vectors_).push_back(var);

@@ -3,7 +3,7 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "basic_types.hpp"
+#include "coordinates/coordinates.hpp"
 #include "interface/mesh_data.hpp"
 #include "io_wrapper.hpp"
 #include "parthenon_arrays.hpp"
@@ -33,7 +34,6 @@ namespace parthenon {
 // forward declarations
 class Mesh;
 class ParameterInput;
-class Coordinates;
 
 //----------------------------------------------------------------------------------------
 //! \struct OutputParameters
@@ -43,6 +43,8 @@ struct OutputParameters {
   int block_number;
   std::string block_name;
   std::string file_basename;
+  int file_number_width;
+  bool file_label_final;
   std::string file_id;
   std::string variable;
   std::vector<std::string> variables;
@@ -115,9 +117,10 @@ class OutputType {
   bool SliceOutputData(MeshBlock *pmb, int dim);
   void SumOutputData(MeshBlock *pmb, int dim);
   void CalculateCartesianVector(ParArrayND<Real> &src, ParArrayND<Real> &dst,
-                                Coordinates *pco);
+                                Coordinates_t *pco);
   // following pure virtual function must be implemented in all derived classes
-  virtual void WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm) = 0;
+  virtual void WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm,
+                               const SignalHandler::OutputSignal signal) = 0;
   virtual void WriteContainer(SimTime &tm, Mesh *pm, ParameterInput *pin, bool flag) {
     return;
   }
@@ -156,7 +159,8 @@ const char hist_param_key[] = "HistoryFunctions";
 class HistoryOutput : public OutputType {
  public:
   explicit HistoryOutput(const OutputParameters &oparams) : OutputType(oparams) {}
-  void WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm) override;
+  void WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm,
+                       const SignalHandler::OutputSignal signal) override;
 };
 
 //----------------------------------------------------------------------------------------
@@ -166,7 +170,8 @@ class HistoryOutput : public OutputType {
 class FormattedTableOutput : public OutputType {
  public:
   explicit FormattedTableOutput(const OutputParameters &oparams) : OutputType(oparams) {}
-  void WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm) override;
+  void WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm,
+                       const SignalHandler::OutputSignal signal) override;
 };
 
 //----------------------------------------------------------------------------------------
@@ -177,7 +182,8 @@ class VTKOutput : public OutputType {
  public:
   explicit VTKOutput(const OutputParameters &oparams) : OutputType(oparams) {}
   void WriteContainer(SimTime &tm, Mesh *pm, ParameterInput *pin, bool flag) override;
-  void WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm) override;
+  void WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm,
+                       const SignalHandler::OutputSignal signal) override;
 };
 
 #ifdef ENABLE_HDF5
@@ -190,11 +196,15 @@ class PHDF5Output : public OutputType {
   // Function declarations
   PHDF5Output(const OutputParameters &oparams, bool restart)
       : OutputType(oparams), restart_(restart) {}
-  void WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm) override;
+  void WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm,
+                       const SignalHandler::OutputSignal signal) override;
   template <bool WRITE_SINGLE_PRECISION>
-  void WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm);
+  void WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm,
+                           const SignalHandler::OutputSignal signal);
 
  private:
+  std::string GenerateFilename_(ParameterInput *pin, SimTime *tm,
+                                const SignalHandler::OutputSignal signal);
   const bool restart_; // true if we write a restart file, false for regular output files
 };
 #endif // ifdef ENABLE_HDF5
@@ -210,7 +220,9 @@ class Outputs {
   Outputs(Mesh *pm, ParameterInput *pin, SimTime *tm = nullptr);
   ~Outputs();
 
-  void MakeOutputs(Mesh *pm, ParameterInput *pin, SimTime *tm = nullptr);
+  void
+  MakeOutputs(Mesh *pm, ParameterInput *pin, SimTime *tm = nullptr,
+              SignalHandler::OutputSignal signal = SignalHandler::OutputSignal::none);
 
  private:
   OutputType *pfirst_type_; // ptr to head OutputType node in singly linked list

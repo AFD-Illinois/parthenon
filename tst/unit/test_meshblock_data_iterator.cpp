@@ -3,7 +3,7 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -26,6 +26,7 @@
 #include "basic_types.hpp"
 #include "config.hpp"
 #include "defs.hpp"
+#include "globals.hpp"
 #include "interface/meshblock_data.hpp"
 #include "interface/metadata.hpp"
 #include "interface/state_descriptor.hpp"
@@ -92,7 +93,7 @@ TEST_CASE("Can pull variables from containers based on Metadata",
     // won't be allocated
     auto dummy_mb = std::make_shared<MeshBlock>(16, 3);
 
-    MeshBlockData<Real> mbd;
+    auto &mbd = *dummy_mb->meshblock_data.Get();
     mbd.Initialize(pkg, dummy_mb);
 
     WHEN("We extract a subcontainer") {
@@ -306,9 +307,9 @@ TEST_CASE("Can pull variables from containers based on Metadata",
       mbd.Initialize(pkg, dummy_mb);
 
       // TODO(JL) test packs with unallocated sparse fields
-      mbd.AllocSparseID("vsparse", 1);
-      mbd.AllocSparseID("vsparse", 13);
-      mbd.AllocSparseID("vsparse", 42);
+      dummy_mb->AllocSparseID("vsparse", 1);
+      dummy_mb->AllocSparseID("vsparse", 13);
+      dummy_mb->AllocateSparse("vsparse_42");
 
       THEN("the low and high index bounds are correct as returned by PackVariables") {
         PackIndexMap imap;
@@ -384,19 +385,20 @@ TEST_CASE("Coarse variable from meshblock_data for cell variable",
   // Make package with some variables
   auto pkg = std::make_shared<StateDescriptor>("Test package");
 
+  constexpr int nside = 16;
+  constexpr int nghost = 2;
+  parthenon::Globals::nghost = nghost;
+
   // we need to connect the MeshBlockData to a dummy mesh block, otherwise variables
   // won't be allocated
-  auto dummy_mb = std::make_shared<MeshBlock>(16, 3);
+  auto dummy_mb = std::make_shared<MeshBlock>(nside, 3);
 
   GIVEN("MeshBlockData, with a variable with coarse data") {
-    constexpr int nside = 16;
-    constexpr int nghost = 2;
     auto cellbounds = IndexShape(nside, nside, nside, nghost);
     auto c_cellbounds = IndexShape(nside / 2, nside / 2, nside / 2, nghost);
 
-    std::vector<int> block_size{nside + 2 * nghost, nside + 2 * nghost,
-                                nside + 2 * nghost};
-    Metadata m({Metadata::Independent, Metadata::WithFluxes}, block_size);
+    // need to flag this as Cell, otherwise won't have correct coarse sizes
+    Metadata m({Metadata::Cell, Metadata::Independent, Metadata::WithFluxes});
 
     pkg->AddField("var", m);
 
@@ -404,11 +406,9 @@ TEST_CASE("Coarse variable from meshblock_data for cell variable",
     mbd.Initialize(pkg, dummy_mb);
     auto &var = mbd.Get("var");
 
-    auto coarse_s =
-        ParArrayND<Real>("var.coarse", var.GetDim(6), var.GetDim(5), var.GetDim(4),
-                         c_cellbounds.ncellsk(IndexDomain::entire),
-                         c_cellbounds.ncellsj(IndexDomain::entire),
-                         c_cellbounds.ncellsi(IndexDomain::entire));
+    auto coarse_s = ParArrayND<Real>(
+        "var.coarse", var.GetCoarseDim(6), var.GetCoarseDim(5), var.GetCoarseDim(4),
+        var.GetCoarseDim(3), var.GetCoarseDim(2), var.GetCoarseDim(1));
 
     THEN("The variable is allocated") { REQUIRE(var.data.GetSize() > 0); }
     var.coarse_s = coarse_s;
@@ -436,6 +436,97 @@ TEST_CASE("Coarse variable from meshblock_data for cell variable",
             REQUIRE(pack.GetDim(1) == c_cellbounds.ncellsi(IndexDomain::entire));
           }
         }
+      }
+    }
+  }
+
+  // reset for subsequent unit tests
+  parthenon::Globals::nghost = 0;
+}
+
+TEST_CASE("Get the correct access pattern when using FlatIdx", "[FlatIdx]") {
+  using parthenon::IndexDomain;
+  using parthenon::IndexShape;
+
+  constexpr int N = 20;
+  constexpr int NDIM = 3;
+  constexpr int N1 = 3;
+  constexpr int N2 = 2;
+  constexpr int N3 = 4;
+  const std::vector<int> tensor2_shape{N, N, N, N1, N2};
+  const std::vector<int> tensor3_shape{N, N, N, N1, N2, N3};
+
+  auto pkg = std::make_shared<StateDescriptor>("Test package");
+
+  auto pmb = std::make_shared<MeshBlock>(N, NDIM);
+
+  GIVEN("Tensor fields accessed using CellVariables") {
+    Metadata m_tensor2({Metadata::Independent, Metadata::WithFluxes, Metadata::Vector},
+                       tensor2_shape);
+    Metadata m_tensor3({Metadata::Independent, Metadata::WithFluxes, Metadata::Vector},
+                       tensor3_shape);
+
+    pkg->AddField("v2", m_tensor2);
+    pkg->AddField("v3", m_tensor3);
+
+    auto &pmbd = pmb->meshblock_data.Get();
+    pmbd->Initialize(pkg, pmb);
+    WHEN("they are initialized to unique values depending on their indices") {
+      auto ib = pmb->cellbounds.GetBoundsI(IndexDomain::entire);
+      auto jb = pmb->cellbounds.GetBoundsJ(IndexDomain::entire);
+      auto kb = pmb->cellbounds.GetBoundsK(IndexDomain::entire);
+
+      auto var2 = pmbd->Get("v2").data;
+      auto var3 = pmbd->Get("v3").data;
+      int n1 = var3.GetDim(4);
+      int n2 = var3.GetDim(5);
+      int n3 = var3.GetDim(6);
+      par_for(
+          loop_pattern_mdrange_tag, "initialize v2, v3", DevExecSpace(), kb.s, kb.e, jb.s,
+          jb.e, ib.s, ib.e, KOKKOS_LAMBDA(int k, int j, int i) {
+            for (int c3 = 0; c3 < n3; ++c3) {
+              for (int c2 = 0; c2 < n2; ++c2) {
+                for (int c1 = 0; c1 < n1; ++c1) {
+                  var2(c2, c1, k, j, i) = i + N * (j + N * (k + N1 * (c1 + N2 * c2)));
+                  var3(c3, c2, c1, k, j, i) =
+                      i + N * (j + N * (k + N1 * (c1 + N2 * (c2 + c3 * N3))));
+                }
+              }
+            }
+          });
+
+      THEN("Accessing the tensor fields from a VariablePack and using FlatIdx to access "
+           "elements of the tensors gives the correct unique values.") {
+        PackIndexMap imap;
+        auto v = pmbd->PackVariables(std::vector<std::string>{"v2", "v3"}, imap);
+
+        auto idx_v3 = imap.GetFlatIdx("v3");
+        const auto tb1 = idx_v3.GetBounds(1);
+        const auto tb2 = idx_v3.GetBounds(2);
+        const auto tb3 = idx_v3.GetBounds(3);
+        Real err3 = 0.0;
+        par_reduce(
+            loop_pattern_mdrange_tag, "compare v3", DevExecSpace(), tb2.s, tb2.e, tb1.s,
+            tb1.e, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+            KOKKOS_LAMBDA(int idx2, int idx1, int k, int j, int i, Real &lerr) {
+              for (int idx3 = tb3.s; idx3 <= tb3.e; ++idx3) {
+                Real n_expected =
+                    i + N * (j + N * (k + N1 * (idx1 + N2 * (idx2 + N3 * idx3))));
+                Real n_actual = v(idx_v3(idx1, idx2, idx3), k, j, i);
+                lerr += std::abs(n_actual - n_expected);
+              }
+            },
+            err3);
+
+        REQUIRE(err3 == 0.0);
+      }
+
+      THEN("We can ask for FlatIdxs of fields that don't exist in the pack") {
+        PackIndexMap imap;
+        auto v = pmbd->PackVariables(std::vector<std::string>{"v2", "v3"}, imap);
+        auto idx_v4 = imap.GetFlatIdx("v4", false);
+        REQUIRE(idx_v4() == -1);
+        REQUIRE(!idx_v4.IsValid());
       }
     }
   }

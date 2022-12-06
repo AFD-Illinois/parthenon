@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -20,6 +20,8 @@
 #include <coordinates/coordinates.hpp>
 #include <interface/metadata.hpp>
 #include <interface/params.hpp>
+#include <interface/sparse_pack.hpp>
+#include <interface/sparse_pool.hpp>
 #include <interface/state_descriptor.hpp>
 #include <interface/variable_pack.hpp>
 #include <kokkos_abstraction.hpp>
@@ -41,7 +43,6 @@ using namespace ::parthenon::prelude;
 using ::parthenon::AmrTag;
 using ::parthenon::ApplicationInput;
 using ::parthenon::BlockList_t;
-using ::parthenon::Coordinates;
 using ::parthenon::DevExecSpace;
 using ::parthenon::HostExecSpace;
 using ::parthenon::Mesh;
@@ -54,6 +55,7 @@ using ::parthenon::PackIndexMap;
 using ::parthenon::par_for;
 using ::parthenon::ParameterInput;
 using ::parthenon::Params;
+using ::parthenon::SparsePool;
 using ::parthenon::StateDescriptor;
 using ::parthenon::TaskStatus;
 using ::parthenon::VariableFluxPack;

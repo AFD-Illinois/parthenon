@@ -23,6 +23,7 @@
 #include <tuple>
 #include <vector>
 
+#include "interface/variable.hpp"
 #include "parthenon_mpi.hpp"
 
 #include "coordinates/coordinates.hpp"
@@ -61,21 +62,12 @@ class MeshRefinement {
   void ProlongateCellCenteredValues(const ParArrayND<Real> &coarse,
                                     ParArrayND<Real> &fine, int sn, int en, int si,
                                     int ei, int sj, int ej, int sk, int ek);
-  void ProlongateSharedFieldX1(const ParArrayND<Real> &coarse, ParArrayND<Real> &fine,
-                               int si, int ei, int sj, int ej, int sk, int ek);
-  void ProlongateSharedFieldX2(const ParArrayND<Real> &coarse, ParArrayND<Real> &fine,
-                               int si, int ei, int sj, int ej, int sk, int ek);
-  void ProlongateSharedFieldX3(const ParArrayND<Real> &coarse, ParArrayND<Real> &fine,
-                               int si, int ei, int sj, int ej, int sk, int ek);
-  void ProlongateInternalField(FaceField &fine, int si, int ei, int sj, int ej, int sk,
-                               int ek);
   void CheckRefinementCondition();
   void SetRefinement(AmrTag flag);
 
   // setter functions for "enrolling" variable arrays in refinement via Mesh::AMR()
   // and/or in BoundaryValues::ProlongateBoundaries() (for SMR and AMR)
-  int AddToRefinement(ParArrayND<Real> pvar_cc, ParArrayND<Real> pcoarse_cc);
-  int AddToRefinement(FaceField *pvar_fc, FaceField *pcoarse_fc);
+  int AddToRefinement(std::shared_ptr<CellVariable<Real>> pvar);
 
   Coordinates_t GetCoarseCoords() const { return coarse_coords; }
 
@@ -87,8 +79,7 @@ class MeshRefinement {
   int refine_flag_, neighbor_rflag_, deref_count_, deref_threshold_;
 
   // tuples of references to AMR-enrolled arrays (quantity, coarse_quantity)
-  std::vector<std::tuple<ParArrayND<Real>, ParArrayND<Real>>> pvars_cc_;
-  std::vector<std::tuple<FaceField *, FaceField *>> pvars_fc_;
+  std::vector<std::shared_ptr<CellVariable<Real>>> pvars_cc_;
 
   // Returns shared pointer to a block
   std::shared_ptr<MeshBlock> GetBlockPointer() {

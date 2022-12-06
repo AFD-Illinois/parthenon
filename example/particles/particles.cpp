@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -25,6 +25,16 @@
 // *************************************************//
 namespace particles_example {
 
+std::unique_ptr<ParticleBound, DeviceDeleter<parthenon::DevMemSpace>>
+SetSwarmIX1UserBC() {
+  return DeviceAllocate<ParticleBoundIX1User>();
+}
+
+std::unique_ptr<ParticleBound, DeviceDeleter<parthenon::DevMemSpace>>
+SetSwarmOX1UserBC() {
+  return DeviceAllocate<ParticleBoundOX1User>();
+}
+
 Packages_t ProcessPackages(std::unique_ptr<ParameterInput> &pin) {
   Packages_t packages;
   packages.Add(particles_example::Particles::Initialize(pin.get()));
@@ -34,6 +44,8 @@ Packages_t ProcessPackages(std::unique_ptr<ParameterInput> &pin) {
 void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   // Don't do anything for now
 }
+
+enum class DepositionMethod { per_particle, per_cell };
 
 // *************************************************//
 // define the "physics" package particles_package, *//
@@ -61,6 +73,16 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
       destroy_particles_frac >= 0. && destroy_particles_frac <= 1.,
       "Fraction of particles to destroy each timestep must be between 0 and 1");
 
+  std::string deposition_method =
+      pin->GetOrAddString("Particles", "deposition_method", "per_particle");
+  if (deposition_method == "per_particle") {
+    pkg->AddParam<>("deposition_method", DepositionMethod::per_particle);
+  } else if (deposition_method == "per_cell") {
+    pkg->AddParam<>("deposition_method", DepositionMethod::per_cell);
+  } else {
+    PARTHENON_THROW("deposition method not recognized");
+  }
+
   bool orbiting_particles =
       pin->GetOrAddBoolean("Particles", "orbiting_particles", false);
   pkg->AddParam<>("orbiting_particles", orbiting_particles);
@@ -76,9 +98,8 @@ std::shared_ptr<StateDescriptor> Initialize(ParameterInput *pin) {
   pkg->AddSwarm(swarm_name, swarm_metadata);
   Metadata real_swarmvalue_metadata({Metadata::Real});
   pkg->AddSwarmValue("t", swarm_name, real_swarmvalue_metadata);
-  pkg->AddSwarmValue("vx", swarm_name, real_swarmvalue_metadata);
-  pkg->AddSwarmValue("vy", swarm_name, real_swarmvalue_metadata);
-  pkg->AddSwarmValue("vz", swarm_name, real_swarmvalue_metadata);
+  Metadata real_vec_swarmvalue_metadata({Metadata::Real}, std::vector<int>{3});
+  pkg->AddSwarmValue("v", swarm_name, real_vec_swarmvalue_metadata);
   pkg->AddSwarmValue("weight", swarm_name, real_swarmvalue_metadata);
 
   std::string field_name = "particle_deposition";
@@ -139,10 +160,24 @@ TaskStatus DestroySomeParticles(MeshBlock *pmb) {
   return TaskStatus::complete;
 }
 
+TaskStatus SortParticlesIfUsingPerCellDeposition(MeshBlock *pmb) {
+  auto pkg = pmb->packages.Get("particles_package");
+  const auto deposition_method = pkg->Param<DepositionMethod>("deposition_method");
+  if (deposition_method == DepositionMethod::per_cell) {
+    auto swarm = pmb->swarm_data.Get()->Get("my particles");
+    swarm->SortParticlesByCell();
+  }
+
+  return TaskStatus::complete;
+}
+
 TaskStatus DepositParticles(MeshBlock *pmb) {
   Kokkos::Profiling::pushRegion("Task_Particles_DepositParticles");
 
   auto swarm = pmb->swarm_data.Get()->Get("my particles");
+
+  auto pkg = pmb->packages.Get("particles_package");
+  const auto deposition_method = pkg->Param<DepositionMethod>("deposition_method");
 
   // Meshblock geometry
   const IndexRange &ib = pmb->cellbounds.GetBoundsI(IndexDomain::interior);
@@ -162,34 +197,46 @@ TaskStatus DepositParticles(MeshBlock *pmb) {
   auto swarm_d = swarm->GetDeviceContext();
 
   auto &particle_dep = pmb->meshblock_data.Get()->Get("particle_deposition").data;
-  // Reset particle count
-  pmb->par_for(
-      "ZeroParticleDep", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
-      KOKKOS_LAMBDA(const int k, const int j, const int i) {
-        particle_dep(k, j, i) = 0.;
-      });
-
   const int ndim = pmb->pmy_mesh->ndim;
 
-  pmb->par_for(
-      "DepositParticles", 0, swarm->GetMaxActiveIndex(), KOKKOS_LAMBDA(const int n) {
-        if (swarm_d.IsActive(n)) {
-          int i = static_cast<int>(std::floor((x(n) - minx_i) / dx_i) + ib.s);
-          int j = 0;
-          if (ndim > 1) {
-            j = static_cast<int>(std::floor((y(n) - minx_j) / dx_j) + jb.s);
-          }
-          int k = 0;
-          if (ndim > 2) {
-            k = static_cast<int>(std::floor((z(n) - minx_k) / dx_k) + kb.s);
-          }
+  if (deposition_method == DepositionMethod::per_particle) {
+    // Reset particle count
+    pmb->par_for(
+        "ZeroParticleDep", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+        KOKKOS_LAMBDA(const int k, const int j, const int i) {
+          particle_dep(k, j, i) = 0.;
+        });
 
-          if (i >= ib.s && i <= ib.e && j >= jb.s && j <= jb.e && k >= kb.s &&
-              k <= kb.e) {
-            Kokkos::atomic_add(&particle_dep(k, j, i), weight(n));
+    pmb->par_for(
+        "DepositParticles", 0, swarm->GetMaxActiveIndex(), KOKKOS_LAMBDA(const int n) {
+          if (swarm_d.IsActive(n)) {
+            int i = static_cast<int>(std::floor((x(n) - minx_i) / dx_i) + ib.s);
+            int j = 0;
+            if (ndim > 1) {
+              j = static_cast<int>(std::floor((y(n) - minx_j) / dx_j) + jb.s);
+            }
+            int k = 0;
+            if (ndim > 2) {
+              k = static_cast<int>(std::floor((z(n) - minx_k) / dx_k) + kb.s);
+            }
+
+            if (i >= ib.s && i <= ib.e && j >= jb.s && j <= jb.e && k >= kb.s &&
+                k <= kb.e) {
+              Kokkos::atomic_add(&particle_dep(k, j, i), weight(n));
+            }
           }
-        }
-      });
+        });
+  } else if (deposition_method == DepositionMethod::per_cell) {
+    pmb->par_for(
+        "DepositParticlesByCell", kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
+        KOKKOS_LAMBDA(const int k, const int j, const int i) {
+          particle_dep(k, j, i) = 0.;
+          for (int n = 0; n < swarm_d.GetParticleCountPerCell(k, j, i); n++) {
+            const int idx = swarm_d.GetFullIndex(k, j, i, n);
+            particle_dep(k, j, i) += weight(idx);
+          }
+        });
+  }
 
   Kokkos::Profiling::popRegion(); // Task_Particles_DepositParticles
   return TaskStatus::complete;
@@ -202,7 +249,7 @@ TaskStatus CreateSomeParticles(MeshBlock *pmb, const double t0) {
   auto swarm = pmb->swarm_data.Get()->Get("my particles");
   auto rng_pool = pkg->Param<RNGPool>("rng_pool");
   auto num_particles = pkg->Param<int>("num_particles");
-  auto v = pkg->Param<Real>("particle_speed");
+  auto vel = pkg->Param<Real>("particle_speed");
   const auto orbiting_particles = pkg->Param<bool>("orbiting_particles");
 
   ParArrayND<int> new_indices;
@@ -226,9 +273,7 @@ TaskStatus CreateSomeParticles(MeshBlock *pmb, const double t0) {
   auto &x = swarm->Get<Real>("x").Get();
   auto &y = swarm->Get<Real>("y").Get();
   auto &z = swarm->Get<Real>("z").Get();
-  auto &vx = swarm->Get<Real>("vx").Get();
-  auto &vy = swarm->Get<Real>("vy").Get();
-  auto &vz = swarm->Get<Real>("vz").Get();
+  auto &v = swarm->Get<Real>("v").Get();
   auto &weight = swarm->Get<Real>("weight").Get();
 
   auto swarm_d = swarm->GetDeviceContext();
@@ -253,21 +298,22 @@ TaskStatus CreateSomeParticles(MeshBlock *pmb, const double t0) {
             // Randomly sample direction perpendicular to origin
             Real theta = acos(2. * rng_gen.drand() - 1.);
             Real phi = 2. * M_PI * rng_gen.drand();
-            vx(n) = sin(theta) * cos(phi);
-            vy(n) = sin(theta) * sin(phi);
-            vz(n) = cos(theta);
+            v(0, n) = sin(theta) * cos(phi);
+            v(1, n) = sin(theta) * sin(phi);
+            v(2, n) = cos(theta);
             // Project v onto plane normal to sphere
-            Real vdN = vx(n) * x(n) + vy(n) * y(n) + vz(n) * z(n);
+            Real vdN = v(0, n) * x(n) + v(1, n) * y(n) + v(2, n) * z(n);
             Real NdN = r * r;
-            vx(n) = vx(n) - vdN / NdN * x(n);
-            vy(n) = vy(n) - vdN / NdN * y(n);
-            vz(n) = vz(n) - vdN / NdN * z(n);
+            v(0, n) = v(0, n) - vdN / NdN * x(n);
+            v(1, n) = v(1, n) - vdN / NdN * y(n);
+            v(2, n) = v(2, n) - vdN / NdN * z(n);
 
             // Normalize
-            Real v_tmp = sqrt(vx(n) * vx(n) + vy(n) * vy(n) + vz(n) * vz(n));
-            vx(n) *= v / v_tmp;
-            vy(n) *= v / v_tmp;
-            vz(n) *= v / v_tmp;
+            Real v_tmp = sqrt(v(0, n) * v(0, n) + v(1, n) * v(1, n) + v(2, n) * v(2, n));
+            PARTHENON_DEBUG_REQUIRE(v_tmp > 0., "Speed must be > 0!");
+            for (int ii = 0; ii < 3; ii++) {
+              v(ii, n) *= vel / v_tmp;
+            }
 
             // Create particles at the beginning of the timestep
             t(n) = t0;
@@ -291,9 +337,9 @@ TaskStatus CreateSomeParticles(MeshBlock *pmb, const double t0) {
             // Randomly sample direction on the unit sphere, fixing speed
             Real theta = acos(2. * rng_gen.drand() - 1.);
             Real phi = 2. * M_PI * rng_gen.drand();
-            vx(n) = v * sin(theta) * cos(phi);
-            vy(n) = v * sin(theta) * sin(phi);
-            vz(n) = v * cos(theta);
+            v(0, n) = vel * sin(theta) * cos(phi);
+            v(1, n) = vel * sin(theta) * sin(phi);
+            v(2, n) = vel * cos(theta);
 
             // Create particles at the beginning of the timestep
             t(n) = t0;
@@ -325,9 +371,7 @@ TaskStatus TransportParticles(MeshBlock *pmb, const StagedIntegrator *integrator
   auto &x = swarm->Get<Real>("x").Get();
   auto &y = swarm->Get<Real>("y").Get();
   auto &z = swarm->Get<Real>("z").Get();
-  auto &vx = swarm->Get<Real>("vx").Get();
-  auto &vy = swarm->Get<Real>("vy").Get();
-  auto &vz = swarm->Get<Real>("vz").Get();
+  auto &v = swarm->Get<Real>("v").Get();
 
   const Real &dx_i = pmb->coords.dx1f(pmb->cellbounds.is(IndexDomain::interior));
   const Real &dx_j = pmb->coords.dx2f(pmb->cellbounds.js(IndexDomain::interior));
@@ -354,37 +398,42 @@ TaskStatus TransportParticles(MeshBlock *pmb, const StagedIntegrator *integrator
     pmb->par_for(
         "TransportOrbitingParticles", 0, max_active_index, KOKKOS_LAMBDA(const int n) {
           if (swarm_d.IsActive(n)) {
-            Real v = sqrt(vx(n) * vx(n) + vy(n) * vy(n) + vz(n) * vz(n));
+            Real vel = sqrt(v(0, n) * v(0, n) + v(1, n) * v(1, n) + v(2, n) * v(2, n));
+            PARTHENON_DEBUG_REQUIRE(vel > 0., "Speed must be > 0!");
             while (t(n) < t0 + dt) {
-              Real dt_cell = dx_push / v;
+              Real dt_cell = dx_push / vel;
               Real dt_end = t0 + dt - t(n);
               Real dt_push = std::min<Real>(dt_cell, dt_end);
 
               Real r = sqrt(x(n) * x(n) + y(n) * y(n) + z(n) * z(n));
 
-              x(n) += vx(n) * dt_push;
-              y(n) += vy(n) * dt_push;
-              z(n) += vz(n) * dt_push;
+              x(n) += v(0, n) * dt_push;
+              y(n) += v(1, n) * dt_push;
+              z(n) += v(2, n) * dt_push;
               t(n) += dt_push;
 
               // Force point back onto spherical shell
               Real r_tmp = sqrt(x(n) * x(n) + y(n) * y(n) + z(n) * z(n));
+              PARTHENON_DEBUG_REQUIRE(r_tmp > 0., "r_tmp must be > 0 for division!");
               x(n) *= r / r_tmp;
               y(n) *= r / r_tmp;
               z(n) *= r / r_tmp;
 
               // Project v onto plane normal to sphere
-              Real vdN = vx(n) * x(n) + vy(n) * y(n) + vz(n) * z(n);
+              Real vdN = v(0, n) * x(n) + v(1, n) * y(n) + v(2, n) * z(n);
               Real NdN = r * r;
-              vx(n) = vx(n) - vdN / NdN * x(n);
-              vy(n) = vy(n) - vdN / NdN * y(n);
-              vz(n) = vz(n) - vdN / NdN * z(n);
+              PARTHENON_DEBUG_REQUIRE(NdN > 0., "NdN must be > 0 for division!");
+              v(0, n) = v(0, n) - vdN / NdN * x(n);
+              v(1, n) = v(1, n) - vdN / NdN * y(n);
+              v(2, n) = v(2, n) - vdN / NdN * z(n);
 
               // Normalize
-              Real v_tmp = sqrt(vx(n) * vx(n) + vy(n) * vy(n) + vz(n) * vz(n));
-              vx(n) *= v / v_tmp;
-              vy(n) *= v / v_tmp;
-              vz(n) *= v / v_tmp;
+              Real v_tmp =
+                  sqrt(v(0, n) * v(0, n) + v(1, n) * v(1, n) + v(2, n) * v(2, n));
+              PARTHENON_DEBUG_REQUIRE(v_tmp > 0., "v_tmp must be > 0 for division!");
+              for (int ii = 0; ii < 3; ii++) {
+                v(ii, n) *= vel / v_tmp;
+              }
 
               bool on_current_mesh_block = true;
               // This call is required to trigger internal boundary condition machinery
@@ -402,15 +451,16 @@ TaskStatus TransportParticles(MeshBlock *pmb, const StagedIntegrator *integrator
     pmb->par_for(
         "TransportParticles", 0, max_active_index, KOKKOS_LAMBDA(const int n) {
           if (swarm_d.IsActive(n)) {
-            Real v = sqrt(vx(n) * vx(n) + vy(n) * vy(n) + vz(n) * vz(n));
+            Real vel = sqrt(v(0, n) * v(0, n) + v(1, n) * v(1, n) + v(2, n) * v(2, n));
+            PARTHENON_DEBUG_REQUIRE(vel > 0., "vel must be > 0 for division!");
             while (t(n) < t0 + dt) {
-              Real dt_cell = dx_push / v;
+              Real dt_cell = dx_push / vel;
               Real dt_end = t0 + dt - t(n);
               Real dt_push = std::min<Real>(dt_cell, dt_end);
 
-              x(n) += vx(n) * dt_push;
-              y(n) += vy(n) * dt_push;
-              z(n) += vz(n) * dt_push;
+              x(n) += v(0, n) * dt_push;
+              y(n) += v(1, n) * dt_push;
+              z(n) += v(2, n) * dt_push;
               t(n) += dt_push;
 
               bool on_current_mesh_block = true;
@@ -595,8 +645,10 @@ TaskCollection ParticleDriver::MakeFinalizationTaskCollection() const {
 
     auto destroy_some_particles = tl.AddTask(none, DestroySomeParticles, pmb.get());
 
-    auto deposit_particles =
-        tl.AddTask(destroy_some_particles, DepositParticles, pmb.get());
+    auto sort_particles = tl.AddTask(destroy_some_particles,
+                                     SortParticlesIfUsingPerCellDeposition, pmb.get());
+
+    auto deposit_particles = tl.AddTask(sort_particles, DepositParticles, pmb.get());
 
     // Defragment if swarm memory pool occupancy is 90%
     auto defrag = tl.AddTask(deposit_particles, &SwarmContainer::Defrag, sc.get(), 0.9);

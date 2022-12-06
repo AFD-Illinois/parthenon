@@ -41,11 +41,10 @@ class MeshBlockPack {
   using pack_type = T;
 
   MeshBlockPack() = default;
-  MeshBlockPack(const ParArray1D<T> view, const IndexShape shape,
-                const ParArray1D<Coordinates_t> coordinates,
-                const std::array<int, 5> dims)
-      : v_(view), cellbounds(shape), coords(coordinates), dims_(dims),
-        ndim_((dims[2] > 1 ? 3 : (dims[1] > 1 ? 2 : 1))) {}
+  MeshBlockPack(const ParArray1D<T> view, const ParArray2D<int> start,
+                const ParArray2D<int> stop, const std::array<int, 5> dims)
+      : v_(view), start_(start), stop_(stop),
+        dims_(dims), ndim_((dims[2] > 1 ? 3 : (dims[1] > 1 ? 2 : 1))) {}
 
   KOKKOS_FORCEINLINE_FUNCTION
   auto &operator()(const int block) const { return v_(block); }
@@ -57,10 +56,28 @@ class MeshBlockPack {
     return v_(block)(n)(k, j, i);
   }
 
+#ifdef ENABLE_SPARSE
+  KOKKOS_FORCEINLINE_FUNCTION bool IsAllocated(const int block, const int var) const {
+    return v_(block).GetDim(4) > var && v_(block).IsAllocated(var);
+  }
+  KOKKOS_FORCEINLINE_FUNCTION
+  int StartIndex(const int block, const int var_index) const {
+    return start_(block, var_index);
+  }
+  KOKKOS_FORCEINLINE_FUNCTION
+  int StopIndex(const int block, const int var_index) const {
+    return stop_(block, var_index);
+  }
   KOKKOS_FORCEINLINE_FUNCTION bool IsSparseIDAllocated(const int block,
                                                        const int var) const {
     return v_(block).GetDim(4) > var && v_(block)(var).is_allocated();
   }
+#else
+  KOKKOS_FORCEINLINE_FUNCTION constexpr bool IsAllocated(const int /*block*/,
+                                                         const int /*var*/) const {
+    return true;
+  }
+#endif
 
   KOKKOS_FORCEINLINE_FUNCTION
   int GetDim(const int i) const {
@@ -69,15 +86,17 @@ class MeshBlockPack {
   }
   KOKKOS_FORCEINLINE_FUNCTION
   int GetNdim() const { return ndim_; }
-  KOKKOS_FORCEINLINE_FUNCTION
-  int GetSparse(const int n) const { return v_(0).GetSparse(n); }
 
-  // TODO(JMM): Also include mesh domain object?
-  IndexShape cellbounds;
-  ParArray1D<Coordinates_t> coords;
+  KOKKOS_FORCEINLINE_FUNCTION
+  int GetSparse(const int b, const int n) const { return v_(b).GetSparse(n); }
+
+  KOKKOS_FORCEINLINE_FUNCTION
+  const Coordinates_t &GetCoords(const int i) const { return v_(i).GetCoords(); }
 
  private:
   ParArray1D<T> v_;
+  ParArray2D<int> start_;
+  ParArray2D<int> stop_;
   std::array<int, 5> dims_;
   int ndim_;
 };

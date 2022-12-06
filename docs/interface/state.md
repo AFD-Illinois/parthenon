@@ -19,9 +19,10 @@ The `StateDescriptor` class is intended to be used to inform Parthenon about the
   component names can be specified per sparse id. Currently, sparse variables are allocated on all
   blocks just like dense variables, however, in a future upgrade, they will only be allocated on
   those blocks where the user explicitly allocates them or non-zero values are advected into.
-* `void AddParam<T>(const std::string& key, T& value)` adds a parameter (e.g. a timestep control coefficient, refinement tolerance, etc.) with name `key` and value `value`.
+* `void AddParam<T>(const std::string& key, T& value, bool is_mutable)` adds a parameter (e.g. a timestep control coefficient, refinement tolerance, etc.) with name `key` and value `value`. If `is_mutable` is true, parameters can be more easily modified.
 * `void UpdateParam<T>(const std::string& key, T& value)`updates a parameter (e.g. a timestep control coefficient, refinement tolerance, etc.) with name `key` and value `value`. A parameter of the same type must exist.
 * `const T& Param(const std::string& key)` provides the getter to access parameters previously added by `AddParam`.
+* `T *MutableParam(const std::string &key)` returns a pointer to a parameter that has been marked mutable when it was added. Note this pointer is *not* marked `const`.
 * `void FillDerivedBlock(MeshBlockData<Real>* rc)` delgates to the `std::function` member `FillDerivedBlock` if set (defaults to `nullptr` and therefore a no-op) that allows an application to provide a function that fills in derived quantities from independent state per `MeshBlockData<Real>`.
 * `void FillDerivedMesh(MeshData<Real>* rc)` delgates to the `std::function` member `FillDerivedMesh` if set (defaults to `nullptr` and therefore a no-op) that allows an application to provide a function that fills in derived quantities from independent state per `MeshData<Real>`.
 * `Real EstimateTimestepBlock(MeshBlockData<Real>* rc)` delgates to the `std::function` member `EstimateTimestepBlock` if set (defaults to `nullptr` and therefore a no-op) that allows an application to provide a means of computing stable/accurate timesteps for a mesh block.
@@ -138,3 +139,9 @@ The `Add(const std::string& label, MeshBlockData<T>& src)` member function creat
 The overload `Add(const std::string &label, MeshBlockData<T> &src, const std::vector<std::string> &names)` provides the same functionality as the above `Add` function, but for a subset of variables provided in the vector of names.  This feature allows downstream applications to allocate storage in a more targeted fashion, as might be desirable to hold source terms for particular equations, for example.
 
 Two simple examples of usage of these new containers are 1) to provide storage for multistage integration schemes and 2) to provide a mechanism to allocate storage for right hand sides, deltas, etc.  Both of these usages are demonstrated in the advection example that ships with Parthenon.
+
+Note that in multistage integrator the fluxes and `bvars` (and their MPI communicator) of a variable
+are shared by default across all stages.
+This means that any kind of communication (most prominently flux correction and ghost zone
+exchange) of a given variable at a given stage should not be interleaved with any other
+modifications/communication of said variable as it may result in undefined behavior.

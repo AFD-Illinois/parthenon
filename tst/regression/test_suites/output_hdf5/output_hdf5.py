@@ -16,13 +16,12 @@
 # ========================================================================================
 
 # Modules
-import math
 import numpy as np
 import sys
 import os
 import utils.test_case
 
-""" To prevent littering up imported folders with .pyc files or __pycache_ folder"""
+# To prevent littering up imported folders with .pyc files or __pycache_ folder
 sys.dont_write_bytecode = True
 
 
@@ -34,7 +33,10 @@ class TestCase(utils.test_case.TestCaseAbs):
 
         # TEST: 2D AMR
         if step == 1:
-            # do nothing, keep defaults
+            # add param missing from input file to test cmdline override
+            parameters.driver_cmd_line_args = [
+                "parthenon/mesh/nx1=64",
+            ]
             return parameters
         # TEST: 3D AMR
         elif step == 2:
@@ -54,6 +56,7 @@ class TestCase(utils.test_case.TestCaseAbs):
         elif step == 3:
             parameters.coverage_status = "only-coverage"
             parameters.driver_cmd_line_args = [
+                "parthenon/mesh/nx1=64",
                 "parthenon/time/tlim=0.01",
             ]
         # Same as step 2 but shortened for calculating coverage
@@ -96,17 +99,19 @@ class TestCase(utils.test_case.TestCaseAbs):
         # TODO(pgrete) make sure this also works/doesn't fail for the user
         ret_2d = phdf_diff.compare(
             [
-                "advection_2d.out0.00001.phdf",
+                "advection_2d.out0.final.phdf",
                 parameters.parthenon_path
-                + "/tst/regression/gold_standard/advection_2d.out0.00001.phdf",
-            ]
+                + "/tst/regression/gold_standard/advection_2d.out0.final.phdf",
+            ],
+            one=True,
         )
         ret_3d = phdf_diff.compare(
             [
-                "advection_3d.out0.00001.phdf",
+                "advection_3d.out0.final.phdf",
                 parameters.parthenon_path
-                + "/tst/regression/gold_standard/advection_3d.out0.00001.phdf",
-            ]
+                + "/tst/regression/gold_standard/advection_3d.out0.final.phdf",
+            ],
+            one=True,
         )
 
         if ret_2d != 0 or ret_3d != 0:
@@ -119,15 +124,47 @@ class TestCase(utils.test_case.TestCaseAbs):
             ["dt", 1.75781e-03, 3.12500e-03],
             ["total", 7.06177e-02, 1.39160e-02],
             ["max", 9.43685e-01, 4.80914e-01],
-            ["min", 1.67180e-10, 1.45889e-07],
+            [
+                "min",
+                # 1.67180e-10 if parameters.sparse_disabled else 1.67171e-10,
+                1.67180e-10,
+                1.45889e-07,
+            ],
         ]
         # check results in last row (at the final time of the sim)
         for i, val in enumerate(ref_results):
             if hst_2d[-1:, i] != val[1]:
-                print("Wrong", val[0], "in hst output of 2D problem")
+                print(
+                    "Wrong",
+                    val[0],
+                    "in hst output of 2D problem:",
+                    hst_2d[-1:, i],
+                    val[1],
+                )
                 analyze_status = False
             if hst_3d[-1:, i] != val[2]:
-                print("Wrong", val[0], "in hst output of 3D problem")
+                print(
+                    "Wrong",
+                    val[0],
+                    "in hst output of 3D problem:",
+                    hst_3d[-1:, i],
+                    val[2],
+                )
+                analyze_status = False
+
+        # Parameter override warning form cmdline should be shown for each run
+        for output in parameters.stdouts:
+            warning_found = False
+            for line in output.decode("utf-8").split("\n"):
+                if ("nx1" in line) and ("will be added" in line):
+                    warning_found = True
+            if not warning_found:
+                print(
+                    f"\n\n!!!! TEST ERROR !!!\n"
+                    f"Parameter override not triggered, but you should never be here "
+                    f"because the simulation should not have started in the first place. "
+                    f"Something is really wrong. Please open an issue on GitHub"
+                )
                 analyze_status = False
 
         return analyze_status

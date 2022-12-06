@@ -15,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "bvals/cc/bvals_cc.hpp"
 #include "globals.hpp" // my_rank
 #include "mesh/mesh.hpp"
 #include "swarm_container.hpp"
@@ -80,11 +79,22 @@ TaskStatus SwarmContainer::Defrag(double min_occupancy) {
                            "Max fractional occupancy of swarm must be >= 0 and <= 1");
 
   for (auto &s : swarmVector_) {
-    s->SetupPersistentMPI();
     if (s->GetNumActive() > 0 &&
         s->GetNumActive() / (s->GetMaxActiveIndex() + 1.0) < min_occupancy) {
       s->Defrag();
     }
+  }
+
+  Kokkos::Profiling::popRegion();
+
+  return TaskStatus::complete;
+}
+
+TaskStatus SwarmContainer::SortParticlesByCell() {
+  Kokkos::Profiling::pushRegion("Task_SwarmContainer_SortParticlesByCell");
+
+  for (auto &s : swarmVector_) {
+    s->SortParticlesByCell();
   }
 
   Kokkos::Profiling::popRegion();

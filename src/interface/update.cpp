@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -17,8 +17,10 @@
 
 #include "config.hpp"
 #include "coordinates/coordinates.hpp"
+#include "globals.hpp"
 #include "interface/meshblock_data.hpp"
 #include "interface/metadata.hpp"
+#include "interface/variable_pack.hpp"
 #include "mesh/mesh.hpp"
 #include "mesh/meshblock.hpp"
 
@@ -46,7 +48,9 @@ TaskStatus FluxDivergence(MeshBlockData<Real> *in, MeshBlockData<Real> *dudt_con
   pmb->par_for(
       "FluxDivergenceBlock", 0, vin.GetDim(4) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int l, const int k, const int j, const int i) {
-        dudt(l, k, j, i) = FluxDivHelper(l, k, j, i, ndim, coords, vin);
+        if (dudt.IsAllocated(l) && vin.IsAllocated(l)) {
+          dudt(l, k, j, i) = FluxDivHelper(l, k, j, i, ndim, coords, vin);
+        }
       });
 
   return TaskStatus::complete;
@@ -68,9 +72,11 @@ TaskStatus FluxDivergence(MeshData<Real> *in_obj, MeshData<Real> *dudt_obj) {
       DEFAULT_LOOP_PATTERN, "FluxDivergenceMesh", DevExecSpace(), 0, vin.GetDim(5) - 1, 0,
       vin.GetDim(4) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int m, const int l, const int k, const int j, const int i) {
-        const auto &coords = vin.coords(m);
-        const auto &v = vin(m);
-        dudt(m, l, k, j, i) = FluxDivHelper(l, k, j, i, ndim, coords, v);
+        if (dudt.IsAllocated(m, l) && vin.IsAllocated(m, l)) {
+          const auto &coords = vin.GetCoords(m);
+          const auto &v = vin(m);
+          dudt(m, l, k, j, i) = FluxDivHelper(l, k, j, i, ndim, coords, v);
+        }
       });
   return TaskStatus::complete;
 }
@@ -94,8 +100,10 @@ TaskStatus UpdateWithFluxDivergence(MeshBlockData<Real> *u0_data,
   pmb->par_for(
       "UpdateWithFluxDivergenceBlock", 0, u0.GetDim(4) - 1, kb.s, kb.e, jb.s, jb.e, ib.s,
       ib.e, KOKKOS_LAMBDA(const int l, const int k, const int j, const int i) {
-        u0(l, k, j, i) = gam0 * u0(l, k, j, i) + gam1 * u1(l, k, j, i) +
-                         beta_dt * FluxDivHelper(l, k, j, i, ndim, coords, u0);
+        if (u0.IsAllocated(l) && u1.IsAllocated(l)) {
+          u0(l, k, j, i) = gam0 * u0(l, k, j, i) + gam1 * u1(l, k, j, i) +
+                           beta_dt * FluxDivHelper(l, k, j, i, ndim, coords, u0);
+        }
       });
 
   return TaskStatus::complete;
@@ -119,11 +127,106 @@ TaskStatus UpdateWithFluxDivergence(MeshData<Real> *u0_data, MeshData<Real> *u1_
       DEFAULT_LOOP_PATTERN, "UpdateWithFluxDivergenceMesh", DevExecSpace(), 0,
       u0_pack.GetDim(5) - 1, 0, u0_pack.GetDim(4) - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
       KOKKOS_LAMBDA(const int m, const int l, const int k, const int j, const int i) {
-        const auto &coords = u0_pack.coords(m);
-        const auto &u0 = u0_pack(m);
-        u0_pack(m, l, k, j, i) = gam0 * u0(l, k, j, i) + gam1 * u1_pack(m, l, k, j, i) +
-                                 beta_dt * FluxDivHelper(l, k, j, i, ndim, coords, u0);
+        if (u0_pack.IsAllocated(m, l) && u1_pack.IsAllocated(m, l)) {
+          const auto &coords = u0_pack.GetCoords(m);
+          const auto &u0 = u0_pack(m);
+          u0_pack(m, l, k, j, i) = gam0 * u0(l, k, j, i) + gam1 * u1_pack(m, l, k, j, i) +
+                                   beta_dt * FluxDivHelper(l, k, j, i, ndim, coords, u0);
+        }
       });
+  return TaskStatus::complete;
+}
+
+TaskStatus SparseDealloc(MeshData<Real> *md) {
+  if (!Globals::sparse_config.enabled || (md->NumBlocks() == 0)) {
+    return TaskStatus::complete;
+  }
+
+  Kokkos::Profiling::pushRegion("Task_SparseDealloc");
+
+  const IndexRange ib = md->GetBoundsI(IndexDomain::entire);
+  const IndexRange jb = md->GetBoundsJ(IndexDomain::entire);
+  const IndexRange kb = md->GetBoundsK(IndexDomain::entire);
+
+  PackIndexMap map;
+  const std::vector<MetadataFlag> flags({Metadata::Sparse});
+  const auto &pack = md->PackVariables(flags, map);
+
+  const int num_blocks = pack.GetDim(5);
+  const int num_vars = pack.GetDim(4);
+
+  auto control_vars = md->GetMeshPointer()->resolved_packages->GetControlVariables();
+
+  const auto tup = SparsePack<>::Get(md, control_vars, {Metadata::Sparse});
+  auto pack2 = std::get<0>(tup);
+  auto pack2Idx = std::get<1>(tup);
+  for (int b = 0; b < num_blocks; ++b) {
+    for (auto &pair : pack2Idx) {
+      int lo = pack2.GetLowerBoundHost(b, PackIdx(pack2Idx[pair.first]));
+      int hi = pack2.GetUpperBoundHost(b, PackIdx(pack2Idx[pair.first]));
+    }
+  }
+
+  ParArray2D<bool> is_zero("IsZero", num_blocks, pack2.GetMaxNumberOfVars());
+  const int Ni = ib.e + 1 - ib.s;
+  const int Nj = jb.e + 1 - jb.s;
+  const int Nk = kb.e + 1 - kb.s;
+  const int NjNi = Nj * Ni;
+  const int NkNjNi = Nk * NjNi;
+  Kokkos::parallel_for(
+      "SparseDealloc",
+      Kokkos::TeamPolicy<>(parthenon::DevExecSpace(), num_blocks, Kokkos::AUTO),
+      KOKKOS_LAMBDA(parthenon::team_mbr_t team_member) {
+        const int b = team_member.league_rank();
+
+        const int lo = pack2.GetLowerBound(b);
+        const int hi = pack2.GetUpperBound(b);
+
+        for (int v = lo; v <= hi; ++v) {
+          const auto &var = pack2(b, v);
+          const Real threshold = var.deallocation_threshold;
+          is_zero(b, v) = true;
+          Kokkos::parallel_for(Kokkos::TeamThreadRange<>(team_member, NkNjNi),
+                               [&](const int idx) {
+                                 const int k = kb.s + idx / NjNi;
+                                 const int j = jb.s + (idx % NjNi) / Ni;
+                                 const int i = ib.s + idx % Ni;
+                                 if (std::abs(var(k, j, i)) > threshold) {
+                                   is_zero(b, v) = false;
+                                   return;
+                                 }
+                               });
+        }
+      });
+
+  auto is_zero_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), is_zero);
+
+  for (int b = 0; b < num_blocks; ++b) {
+    for (auto &control_var : control_vars) {
+      int lo = pack2.GetLowerBoundHost(b, PackIdx(pack2Idx[control_var]));
+      int hi = pack2.GetUpperBoundHost(b, PackIdx(pack2Idx[control_var]));
+      if (lo <= hi) { // Check that this control variable is actually in the pack
+        auto &counter = md->GetBlockData(b)->Get(control_var).dealloc_count;
+        bool all_zero = true;
+        for (int iv = lo; iv <= hi; ++iv)
+          all_zero = all_zero && is_zero_h(b, iv);
+        if (all_zero) {
+          counter++;
+        } else {
+          counter = 0;
+        }
+        if (counter > Globals::sparse_config.deallocation_count) {
+          // this variable has been flagged for deallocation deallocation_count times in
+          // a row, now deallocate it
+          counter = 0;
+          auto pmb = md->GetBlockData(b)->GetBlockPointer();
+          pmb->DeallocateSparse(control_var);
+        }
+      }
+    }
+  }
+
+  Kokkos::Profiling::popRegion(); // Task_SparseDealloc
   return TaskStatus::complete;
 }
 

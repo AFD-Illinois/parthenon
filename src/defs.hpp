@@ -46,7 +46,6 @@ namespace parthenon {
 
 // forward declarations needed for function pointer type aliases
 class MeshBlock;
-class Coordinates;
 class ParameterInput;
 
 //--------------------------------------------------------------------------------------
@@ -152,6 +151,11 @@ using pMeshBlockApplicationData_t = std::unique_ptr<MeshBlockApplicationData>;
 
 // we still need to define this somewhere, though
 inline MeshBlockApplicationData::~MeshBlockApplicationData() {}
+
+// Convience definitions
+constexpr uint64_t GiB = 1024 * 1024 * 1024;
+constexpr uint64_t MiB = 1024 * 1024;
+constexpr uint64_t KiB = 1024;
 
 } // namespace parthenon
 

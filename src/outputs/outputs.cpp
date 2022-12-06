@@ -3,7 +3,7 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -86,6 +86,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "coordinates/coordinates.hpp"
 #include "defs.hpp"
 #include "mesh/mesh.hpp"
 #include "mesh/meshblock.hpp"
@@ -149,6 +150,8 @@ Outputs::Outputs(Mesh *pm, ParameterInput *pin, SimTime *tm) {
       // set file number, basename, id, and format
       op.file_number = pin->GetOrAddInteger(op.block_name, "file_number", 0);
       op.file_basename = pin->GetOrAddString("parthenon/job", "problem_id", "parthenon");
+      op.file_number_width = pin->GetOrAddInteger(op.block_name, "file_number_width", 5);
+      op.file_label_final = pin->GetOrAddBoolean(op.block_name, "use_final_label", true);
       char define_id[10];
       std::snprintf(define_id, sizeof(define_id), "out%d",
                     op.block_number); // default id="outN"
@@ -465,7 +468,8 @@ void OutputType::ClearOutputData() {
 //! \fn void Outputs::MakeOutputs(Mesh *pm, ParameterInput *pin, bool wtflag)
 //  \brief scans through singly linked list of OutputTypes and makes any outputs needed.
 
-void Outputs::MakeOutputs(Mesh *pm, ParameterInput *pin, SimTime *tm) {
+void Outputs::MakeOutputs(Mesh *pm, ParameterInput *pin, SimTime *tm,
+                          const SignalHandler::OutputSignal signal) {
   Kokkos::Profiling::pushRegion("MakeOutputs");
   bool first = true;
   OutputType *ptype = pfirst_type_;
@@ -473,14 +477,14 @@ void Outputs::MakeOutputs(Mesh *pm, ParameterInput *pin, SimTime *tm) {
     if ((tm == nullptr) ||
         ((ptype->output_params.dt >= 0.0) &&
          ((tm->ncycle == 0) || (tm->time >= ptype->output_params.next_time) ||
-          (tm->time >= tm->tlim)))) {
+          (tm->time >= tm->tlim) || (signal != SignalHandler::OutputSignal::none)))) {
       if (first && ptype->output_params.file_type != "hst") {
         pm->ApplyUserWorkBeforeOutput(pin);
         first = false;
       }
-      ptype->WriteOutputFile(pm, pin, tm);
+      ptype->WriteOutputFile(pm, pin, tm, signal);
     }
-    ptype = ptype->pnext_type; // move to next OutputType node in signly linked list
+    ptype = ptype->pnext_type; // move to next OutputType node in singly linked list
   }
   Kokkos::Profiling::popRegion(); // MakeOutputs
 }
@@ -707,6 +711,6 @@ void OutputType::SumOutputData(MeshBlock *pmb, int dim) {
 //  \brief Convert vectors in curvilinear coordinates into Cartesian
 
 void OutputType::CalculateCartesianVector(ParArrayND<Real> &src, ParArrayND<Real> &dst,
-                                          Coordinates *pco) {}
+                                          Coordinates_t *pco) {}
 
 } // namespace parthenon

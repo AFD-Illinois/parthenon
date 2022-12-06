@@ -1,9 +1,9 @@
 //========================================================================================
 // Parthenon performance portable AMR framework
-// Copyright(C) 2021 The Parthenon collaboration
+// Copyright(C) 2021-2022 The Parthenon collaboration
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2021-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -27,10 +27,12 @@
 #include <vector>
 
 #include "basic_types.hpp"
+#include "bvals/cc/bvals_cc_in_one.hpp"
 #include "config.hpp"
 #include "globals.hpp"
 #include "interface/update.hpp"
 #include "kokkos_abstraction.hpp"
+#include "mesh/refinement_cc_in_one.hpp"
 
 using namespace parthenon::driver::prelude;
 using namespace parthenon::Update;
@@ -373,8 +375,7 @@ void ProblemGenerator(MeshBlock *pmb, ParameterInput *pin) {
   int num_tracers_meshblock = std::round(num_tracers * number_meshblock / number_mesh);
 
   ParArrayND<int> new_indices;
-  const auto new_particles_mask =
-      swarm->AddEmptyParticles(num_tracers_meshblock, new_indices);
+  swarm->AddEmptyParticles(num_tracers_meshblock, new_indices);
 
   auto &x = swarm->Get<Real>("x").Get();
   auto &y = swarm->Get<Real>("y").Get();
@@ -431,38 +432,63 @@ TaskCollection ParticleDriver::MakeTaskCollection(BlockList_t &blocks, int stage
     auto &dudt = pmb->meshblock_data.Get("dUdt");
     auto &sc1 = pmb->meshblock_data.Get(stage_name[stage]);
 
-    auto start_recv = tl.AddTask(none, &MeshBlockData<Real>::StartReceiving, sc1.get(),
-                                 BoundaryCommSubset::all);
-
     auto advect_flux = tl.AddTask(none, tracers_example::CalculateFluxes, sc0.get());
+  }
 
-    auto send_flux =
-        tl.AddTask(advect_flux, &MeshBlockData<Real>::SendFluxCorrection, sc0.get());
+  const int num_partitions = pmesh->DefaultNumPartitions();
+  // note that task within this region that contains one tasklist per pack
+  // could still be executed in parallel
+  TaskRegion &single_tasklist_per_pack_region = tc.AddRegion(num_partitions);
+  for (int i = 0; i < num_partitions; i++) {
+    auto &tl = single_tasklist_per_pack_region[i];
+    auto &mbase = pmesh->mesh_data.GetOrAdd("base", i);
+    auto &mc0 = pmesh->mesh_data.GetOrAdd(stage_name[stage - 1], i);
+    auto &mc1 = pmesh->mesh_data.GetOrAdd(stage_name[stage], i);
+    auto &mdudt = pmesh->mesh_data.GetOrAdd("dUdt", i);
 
-    auto recv_flux =
-        tl.AddTask(advect_flux, &MeshBlockData<Real>::ReceiveFluxCorrection, sc0.get());
+    const auto any = parthenon::BoundaryType::any;
 
+    tl.AddTask(none, parthenon::cell_centered_bvars::StartReceiveBoundBufs<any>, mc1);
+    tl.AddTask(none, parthenon::cell_centered_bvars::StartReceiveFluxCorrections, mc0);
+
+    auto send_flx =
+        tl.AddTask(none, parthenon::cell_centered_bvars::LoadAndSendFluxCorrections, mc0);
+    auto recv_flx =
+        tl.AddTask(none, parthenon::cell_centered_bvars::ReceiveFluxCorrections, mc0);
+    auto set_flx =
+        tl.AddTask(recv_flx, parthenon::cell_centered_bvars::SetFluxCorrections, mc0);
+
+    // compute the divergence of fluxes of conserved variables
     auto flux_div =
-        tl.AddTask(recv_flux, FluxDivergence<MeshBlockData<Real>>, sc0.get(), dudt.get());
+        tl.AddTask(set_flx, FluxDivergence<MeshData<Real>>, mc0.get(), mdudt.get());
 
-    auto avg_data = tl.AddTask(flux_div, AverageIndependentData<MeshBlockData<Real>>,
-                               sc0.get(), base.get(), beta);
+    auto avg_data = tl.AddTask(flux_div, AverageIndependentData<MeshData<Real>>,
+                               mc0.get(), mbase.get(), beta);
+    // apply du/dt to all independent fields in the container
+    auto update = tl.AddTask(avg_data, UpdateIndependentData<MeshData<Real>>, mc0.get(),
+                             mdudt.get(), beta * dt, mc1.get());
 
-    auto update = tl.AddTask(avg_data, UpdateIndependentData<MeshBlockData<Real>>,
-                             sc0.get(), dudt.get(), beta * dt, sc1.get());
+    // do boundary exchange
 
-    auto send = tl.AddTask(update, &MeshBlockData<Real>::SendBoundaryBuffers, sc1.get());
+    auto send =
+        tl.AddTask(update, parthenon::cell_centered_bvars::SendBoundBufs<any>, mc1);
+    auto recv =
+        tl.AddTask(update, parthenon::cell_centered_bvars::ReceiveBoundBufs<any>, mc1);
+    auto set = tl.AddTask(recv, parthenon::cell_centered_bvars::SetBounds<any>, mc1);
 
-    auto recv = tl.AddTask(send, &MeshBlockData<Real>::ReceiveBoundaryBuffers, sc1.get());
+    if (pmesh->multilevel) {
+      tl.AddTask(set, parthenon::cell_centered_refinement::RestrictPhysicalBounds,
+                 mc1.get());
+    }
+  }
 
-    auto fill_from_bufs =
-        tl.AddTask(recv, &MeshBlockData<Real>::SetBoundaries, sc1.get());
+  TaskRegion &async_region1 = tc.AddRegion(nblocks);
+  for (int n = 0; n < nblocks; n++) {
+    auto &pmb = blocks[n];
+    auto &tl = async_region1[n];
+    auto &sc1 = pmb->meshblock_data.Get(stage_name[stage]);
 
-    auto clear_comm_flags =
-        tl.AddTask(fill_from_bufs, &MeshBlockData<Real>::ClearBoundary, sc1.get(),
-                   BoundaryCommSubset::all);
-
-    auto prolongBound = tl.AddTask(fill_from_bufs, parthenon::ProlongateBoundaries, sc1);
+    auto prolongBound = tl.AddTask(none, parthenon::ProlongateBoundaries, sc1);
 
     auto set_bc = tl.AddTask(prolongBound, parthenon::ApplyBoundaryConditions, sc1);
 

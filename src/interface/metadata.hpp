@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -23,6 +23,7 @@
 #include <tuple>
 #include <vector>
 
+#include "globals.hpp"
 #include "utils/error_checking.hpp"
 
 /// The point of this macro is to generate code for each built-in flag using the
@@ -49,6 +50,8 @@
   PARTHENON_INTERNAL_FOR_FLAG(Edge)                                                      \
   /** node variable */                                                                   \
   PARTHENON_INTERNAL_FOR_FLAG(Node)                                                      \
+  /** particle variable */                                                               \
+  PARTHENON_INTERNAL_FOR_FLAG(Particle)                                                  \
   /************************************************/                                     \
   /** ROLE: Exactly one must be specified (default is Provides) */                       \
   /** Private to a package */                                                            \
@@ -91,13 +94,16 @@
   PARTHENON_INTERNAL_FOR_FLAG(Restart)                                                   \
   /** is a sparse variable */                                                            \
   PARTHENON_INTERNAL_FOR_FLAG(Sparse)                                                    \
+  /** should this variable minimize buffer use during communication */                   \
+  PARTHENON_INTERNAL_FOR_FLAG(SparseCommunication)                                       \
   /** only one copy even if multiple stages */                                           \
   PARTHENON_INTERNAL_FOR_FLAG(OneCopy)                                                   \
   /** Do boundary communication */                                                       \
   PARTHENON_INTERNAL_FOR_FLAG(FillGhost)                                                 \
   /** does variable have fluxes */                                                       \
-  PARTHENON_INTERNAL_FOR_FLAG(WithFluxes)
-
+  PARTHENON_INTERNAL_FOR_FLAG(WithFluxes)                                                \
+  /** the variable needs to be communicated across ranks during remeshing */             \
+  PARTHENON_INTERNAL_FOR_FLAG(RemeshComm)
 namespace parthenon {
 
 namespace internal {
@@ -225,6 +231,28 @@ class Metadata {
       PARTHENON_REQUIRE_THROWS(
           shape_.size() <= 3,
           "Variables tied to mesh entities can only have a shape of rank <= 3");
+
+      int num_comp = 1;
+      for (auto s : shape) {
+        num_comp *= s;
+      }
+
+      PARTHENON_REQUIRE_THROWS(component_labels.size() == 0 ||
+                                   (component_labels.size() == num_comp),
+                               "Must provide either 0 component labels or the same "
+                               "number as the number of components");
+    }
+
+    // Set the allocation and deallocation thresholds
+    if (IsSet(Sparse)) {
+      allocation_threshold_ = Globals::sparse_config.allocation_threshold;
+      deallocation_threshold_ = Globals::sparse_config.deallocation_threshold;
+      default_value_ = 0.0;
+    } else {
+      // Not sparse, so set to zero so we are guaranteed never to deallocate
+      allocation_threshold_ = 0.0;
+      deallocation_threshold_ = 0.0;
+      default_value_ = 0.0;
     }
   }
 
@@ -245,6 +273,18 @@ class Metadata {
 
   // Static routines
   static MetadataFlag AllocateNewFlag(std::string &&name);
+
+  // Sparse threshold routines
+  void SetSparseThresholds(parthenon::Real alloc, parthenon::Real dealloc,
+                           parthenon::Real default_val = 0.0) {
+    allocation_threshold_ = alloc;
+    deallocation_threshold_ = dealloc;
+    default_value_ = default_val;
+  }
+
+  parthenon::Real GetDeallocationThreshold() const { return deallocation_threshold_; }
+  parthenon::Real GetAllocationThreshold() const { return allocation_threshold_; }
+  parthenon::Real GetDefaultValue() const { return default_value_; }
 
   // Individual flag setters, using these could result in an invalid set of flags, use
   // IsValid to check if the flags are valid
@@ -322,7 +362,7 @@ class Metadata {
     PARTHENON_THROW("No topology flag set");
   }
 
-  bool IsMeshTied() const { return Where() != None; }
+  bool IsMeshTied() const { return (Where() != None); }
 
   /// returns the type of the variable
   MetadataFlag Type() const {
@@ -358,7 +398,7 @@ class Metadata {
   /*--------------------------------------------------------*/
 
   // get the dims of the 6D array
-  std::array<int, 6> GetArrayDims(std::weak_ptr<MeshBlock> wpmb) const;
+  std::array<int, 6> GetArrayDims(std::weak_ptr<MeshBlock> wpmb, bool coarse) const;
 
   /// Returns the attribute flags as a string of 1/0
   std::string MaskAsString() const {
@@ -439,6 +479,10 @@ class Metadata {
   std::vector<int> shape_ = {1};
   std::vector<std::string> component_labels_ = {};
   std::string associated_ = "";
+
+  parthenon::Real allocation_threshold_;
+  parthenon::Real deallocation_threshold_;
+  parthenon::Real default_value_;
 
   /// if flag is true set bit, clears otherwise
   void DoBit(MetadataFlag bit, bool flag) {

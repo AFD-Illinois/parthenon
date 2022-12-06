@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -26,9 +26,11 @@
 #include "defs.hpp"
 #include "interface/metadata.hpp"
 #include "interface/params.hpp"
+#include "interface/sparse_pack.hpp"
 #include "interface/state_descriptor.hpp"
 
 #include "kokkos_abstraction.hpp"
+#include "mesh/domain.hpp"
 
 namespace parthenon {
 
@@ -74,7 +76,12 @@ TaskStatus WeightedSumData(const std::vector<F> &flags, T *in1, T *in2, const Re
       DEFAULT_LOOP_PATTERN, "WeightedSumData", DevExecSpace(), 0, x.GetDim(5) - 1, 0,
       x.GetDim(4) - 1, 0, x.GetDim(3) - 1, 0, x.GetDim(2) - 1, 0, x.GetDim(1) - 1,
       KOKKOS_LAMBDA(const int b, const int l, const int k, const int j, const int i) {
-        z(b, l, k, j, i) = w1 * x(b, l, k, j, i) + w2 * y(b, l, k, j, i);
+        // TOOD(someone) This is potentially dangerous and/or not intended behavior
+        // as we still may want to update (or populate) z if any of those vars are
+        // not allocated yet.
+        if (x.IsAllocated(b, l) && y.IsAllocated(b, l) && z.IsAllocated(b, l)) {
+          z(b, l, k, j, i) = w1 * x(b, l, k, j, i) + w2 * y(b, l, k, j, i);
+        }
       });
   Kokkos::Profiling::popRegion(); // Task_WeightedSumData
   return TaskStatus::complete;
@@ -122,6 +129,17 @@ TaskStatus EstimateTimestep(T *rc) {
 }
 
 template <typename T>
+TaskStatus PreCommFillDerived(T *rc) {
+  Kokkos::Profiling::pushRegion("Task_PreCommFillDerived");
+  auto pm = rc->GetParentPointer();
+  for (const auto &pkg : pm->packages.AllPackages()) {
+    pkg.second->PreCommFillDerived(rc);
+  }
+  Kokkos::Profiling::popRegion();
+  return TaskStatus::complete;
+}
+
+template <typename T>
 TaskStatus FillDerived(T *rc) {
   Kokkos::Profiling::pushRegion("Task_FillDerived");
   auto pm = rc->GetParentPointer();
@@ -143,6 +161,75 @@ TaskStatus FillDerived(T *rc) {
   Kokkos::Profiling::popRegion(); // Task_FillDerived
   return TaskStatus::complete;
 }
+
+template <typename T>
+TaskStatus InitNewlyAllocatedVars(T *rc) {
+  if (!rc->AllVariablesInitialized()) {
+    std::cout << "Initializing variable interiors after allocation" << std::endl;
+
+    const IndexDomain interior = IndexDomain::interior;
+    const IndexRange ib = rc->GetBoundsI(interior);
+    const IndexRange jb = rc->GetBoundsJ(interior);
+    const IndexRange kb = rc->GetBoundsK(interior);
+    const int Ni = ib.e + 1 - ib.s;
+    const int Nj = jb.e + 1 - jb.s;
+    const int Nk = kb.e + 1 - kb.s;
+    const int NjNi = Nj * Ni;
+    const int NkNjNi = Nk * NjNi;
+
+    // This pack will always be freshly built, since we only get here if sparse data
+    // was allocated and hasn't been initialized, which in turn implies the cached
+    // pack must be stale.
+    auto v = parthenon::SparsePack<variable_names::any>::Get(rc, {Metadata::Sparse});
+
+    Kokkos::parallel_for(
+        "Set newly allocated interior to default",
+        Kokkos::TeamPolicy<>(parthenon::DevExecSpace(), v.GetNBlocks(), Kokkos::AUTO),
+        KOKKOS_LAMBDA(parthenon::team_mbr_t team_member) {
+          const int b = team_member.league_rank();
+          int lo = v.GetLowerBound(b, variable_names::any());
+          int hi = v.GetUpperBound(b, variable_names::any());
+
+          for (int vidx = lo; vidx <= hi; ++vidx) {
+            if (!v(b, vidx).initialized) {
+              Real val = v(b, vidx).sparse_default_val;
+              // printf("Initializing block % i variable %i to %e \n", b, vidx, val);
+              Kokkos::parallel_for(Kokkos::TeamThreadRange<>(team_member, NkNjNi),
+                                   [&](const int idx) {
+                                     const int k = kb.s + idx / NjNi;
+                                     const int j = jb.s + (idx % NjNi) / Ni;
+                                     const int i = ib.s + idx % Ni;
+                                     v(b, vidx, k, j, i) = val;
+                                   });
+            }
+          }
+        });
+
+    // Set initialized here since everything has been filled with default values,
+    // user defined functions may overwrite these in the next step but that doesn't
+    // change initialization status of the interior
+    rc->SetAllVariablesToInitialized();
+  }
+
+  // Do user defined initializations if present
+  // This has to be done even in the case where no blocks have been allocated
+  // since the boundaries of allocated blocks could have received default data
+  // in any case
+  Kokkos::Profiling::pushRegion("Task_InitNewlyAllocatedVars");
+  auto pm = rc->GetParentPointer();
+  for (const auto &pkg : pm->packages.AllPackages()) {
+    pkg.second->InitNewlyAllocatedVars(rc);
+  }
+  Kokkos::Profiling::popRegion();
+
+  // Don't worry about flagging variables as initialized
+  // since they will be flagged at the beginning of the
+  // next step in the evolution driver
+
+  return TaskStatus::complete;
+}
+
+TaskStatus SparseDealloc(MeshData<Real> *md);
 
 } // namespace Update
 

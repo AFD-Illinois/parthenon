@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-#include "bvals/cc/bvals_cc.hpp"
+#include "globals.hpp"
 #include "interface/metadata.hpp"
 #include "interface/state_descriptor.hpp"
 #include "interface/variable.hpp"
@@ -41,9 +41,7 @@ void MeshBlockData<T>::Initialize(
 
   // clear all variables, maps, and pack caches
   varVector_.clear();
-  faceVector_.clear();
   varMap_.clear();
-  faceMap_.clear();
   varPackMap_.clear();
   coarseVarPackMap_.clear();
   varFluxPackMap_.clear();
@@ -63,42 +61,12 @@ void MeshBlockData<T>::Initialize(
 template <typename T>
 void MeshBlockData<T>::AddField(const std::string &base_name, const Metadata &metadata,
                                 int sparse_id) {
-  // branch on kind of variable
-  if (metadata.Where() == Metadata::Node) {
-    PARTHENON_THROW("Node variables are not implemented yet");
-  } else if (metadata.Where() == Metadata::Edge) {
-    // add an edge variable
-    std::cerr << "Accessing unliving edge array in stage" << std::endl;
-    std::exit(1);
-    // s->_edgeVector.push_back(
-    //     new EdgeVariable(label, metadata,
-    //                      pmy_block->ncells3, pmy_block->ncells2, pmy_block->ncells1));
-  } else if (metadata.Where() == Metadata::Face) {
-    if (!(metadata.IsSet(Metadata::OneCopy))) {
-      std::cerr << "Currently one one-copy face fields are supported" << std::endl;
-      std::exit(1);
-    }
-    if (metadata.IsSet(Metadata::FillGhost)) {
-      std::cerr << "Ghost zones not yet supported for face fields" << std::endl;
-      std::exit(1);
-    }
-    // add a face variable
-    auto pfv = std::make_shared<FaceVariable<T>>(
-        base_name, metadata.GetArrayDims(pmy_block), metadata);
-    Add(pfv);
-  } else {
-    auto pvar =
-        std::make_shared<CellVariable<T>>(base_name, metadata, sparse_id, pmy_block);
-    Add(pvar);
+  auto pvar =
+      std::make_shared<CellVariable<T>>(base_name, metadata, sparse_id, pmy_block);
+  Add(pvar);
 
-    // TODO(JL) For now, allocate sparse and dense fields, because we don't yet have
-    // machinery to deal with non-allocated sparse fields
+  if (!Globals::sparse_config.enabled || !pvar->IsSparse()) {
     pvar->Allocate(pmy_block);
-
-    // once that machinery is in place, replace the above with this:
-    // if (!var->IsSparse()) {
-    //   var->Allocate(pmy_block);
-    // }
   }
 }
 
@@ -124,7 +92,7 @@ void MeshBlockData<T>::CopyFrom(const MeshBlockData<T> &src, bool shallow_copy,
     if (shallow_copy || var->IsSet(Metadata::OneCopy)) {
       Add(var);
     } else {
-      Add(var->AllocateCopy(false, pmy_block));
+      Add(var->AllocateCopy(pmy_block));
     }
   };
 
@@ -132,12 +100,8 @@ void MeshBlockData<T>::CopyFrom(const MeshBlockData<T> &src, bool shallow_copy,
     for (auto v : src.GetCellVariableVector()) {
       add_var(v);
     }
-    for (auto fv : src.GetFaceVector()) {
-      add_var(fv);
-    }
   } else {
     auto var_map = src.GetCellVariableMap();
-    auto face_map = src.GetFaceMap();
 
     for (const auto &name : names) {
       bool found = false;
@@ -145,14 +109,6 @@ void MeshBlockData<T>::CopyFrom(const MeshBlockData<T> &src, bool shallow_copy,
       if (v != var_map.end()) {
         found = true;
         add_var(v->second);
-      }
-
-      auto fv = face_map.find(name);
-      if (fv != face_map.end()) {
-        PARTHENON_REQUIRE_THROWS(!found, "MeshBlockData::CopyFrom: Variable '" + name +
-                                             "' found more than once");
-        found = true;
-        add_var(fv->second);
       }
 
       if (!found && (resolved_packages_ != nullptr)) {
@@ -216,8 +172,7 @@ template <typename T>
 const VariableFluxPack<T> &MeshBlockData<T>::PackListedVariablesAndFluxes(
     const VarLabelList &var_list, const VarLabelList &flux_list, PackIndexMap *map,
     vpack_types::StringPair *key) {
-  vpack_types::StringPair keys =
-      std::make_pair(std::move(var_list.labels()), std::move(flux_list.labels()));
+  vpack_types::StringPair keys = std::make_pair(var_list.labels(), flux_list.labels());
 
   auto itr = varFluxPackMap_.find(keys);
   bool make_new_pack = false;
@@ -239,6 +194,7 @@ const VariableFluxPack<T> &MeshBlockData<T>::PackListedVariablesAndFluxes(
     new_item.alloc_status = var_list.alloc_status();
     new_item.flux_alloc_status = flux_list.alloc_status();
     new_item.pack = MakeFluxPack(var_list, flux_list, &new_item.map);
+    new_item.pack.coords = GetParentPointer()->coords_device;
     itr = varFluxPackMap_.insert({keys, new_item}).first;
 
     // need to grab pointers here
@@ -289,6 +245,7 @@ MeshBlockData<T>::PackListedVariables(const VarLabelList &var_list, bool coarse,
     PackIndxPair<T> new_item;
     new_item.alloc_status = var_list.alloc_status();
     new_item.pack = MakePack<T>(var_list, coarse, &new_item.map);
+    new_item.pack.coords = GetParentPointer()->coords_device;
 
     itr = packmap.insert({key, new_item}).first;
 
@@ -427,170 +384,6 @@ void MeshBlockData<T>::Remove(const std::string &label) {
 }
 
 template <typename T>
-TaskStatus MeshBlockData<T>::SendFluxCorrection() {
-  Kokkos::Profiling::pushRegion("Task_SendFluxCorrection");
-  for (auto &v : varVector_) {
-    if (v->IsSet(Metadata::WithFluxes) && v->IsSet(Metadata::FillGhost)) {
-      v->vbvar->SendFluxCorrection();
-    }
-  }
-
-  Kokkos::Profiling::popRegion(); // Task_SendFluxCorrection
-  return TaskStatus::complete;
-}
-
-template <typename T>
-TaskStatus MeshBlockData<T>::ReceiveFluxCorrection() {
-  Kokkos::Profiling::pushRegion("Task_ReceiveFluxCorrection");
-  int success = 0, total = 0;
-  for (auto &v : varVector_) {
-    if (v->IsSet(Metadata::WithFluxes) && v->IsSet(Metadata::FillGhost)) {
-      if (v->vbvar->ReceiveFluxCorrection()) {
-        success++;
-      }
-      total++;
-    }
-  }
-
-  Kokkos::Profiling::popRegion(); // Task_ReceiveFluxCorrection
-  if (success == total) return TaskStatus::complete;
-  return TaskStatus::incomplete;
-}
-
-template <typename T>
-TaskStatus MeshBlockData<T>::SendBoundaryBuffers() {
-  Kokkos::Profiling::pushRegion("Task_SendBoundaryBuffers_MeshBlockData");
-  // sends the boundary
-  for (auto &v : varVector_) {
-    if (v->IsSet(Metadata::FillGhost)) {
-      v->resetBoundary();
-      v->vbvar->SendBoundaryBuffers();
-    }
-  }
-
-  Kokkos::Profiling::popRegion(); // Task_SendBoundaryBuffers_MeshBlockData
-  return TaskStatus::complete;
-}
-
-template <typename T>
-void MeshBlockData<T>::SetupPersistentMPI() {
-  // setup persistent MPI
-  for (auto &v : varVector_) {
-    if (v->IsSet(Metadata::FillGhost)) {
-      v->resetBoundary();
-      v->vbvar->SetupPersistentMPI();
-    }
-  }
-}
-
-template <typename T>
-TaskStatus MeshBlockData<T>::ReceiveBoundaryBuffers() {
-  Kokkos::Profiling::pushRegion("Task_ReceiveBoundaryBuffers_MeshBlockData");
-  bool ret = true;
-  // receives the boundary
-  for (auto &v : varVector_) {
-    if (!v->mpiStatus) {
-      if (v->IsSet(Metadata::FillGhost)) {
-        // ret = ret & v->vbvar->ReceiveBoundaryBuffers();
-        // In case we have trouble with multiple arrays causing
-        // problems with task status, we should comment one line
-        // above and uncomment the if block below
-        v->resetBoundary();
-        v->mpiStatus = v->vbvar->ReceiveBoundaryBuffers();
-        ret = (ret & v->mpiStatus);
-      }
-    }
-  }
-
-  Kokkos::Profiling::popRegion(); // Task_ReceiveBoundaryBuffers_MeshBlockData
-  if (ret) return TaskStatus::complete;
-  return TaskStatus::incomplete;
-}
-
-template <typename T>
-TaskStatus MeshBlockData<T>::ReceiveAndSetBoundariesWithWait() {
-  Kokkos::Profiling::pushRegion("Task_ReceiveAndSetBoundariesWithWait");
-  for (auto &v : varVector_) {
-    if ((!v->mpiStatus) && v->IsSet(Metadata::FillGhost)) {
-      v->resetBoundary();
-      v->vbvar->ReceiveAndSetBoundariesWithWait();
-      v->mpiStatus = true;
-    }
-  }
-
-  Kokkos::Profiling::popRegion(); // Task_ReceiveAndSetBoundariesWithWait
-  return TaskStatus::complete;
-}
-// This really belongs in MeshBlockData.cpp. However if I put it in there,
-// the meshblock file refuses to compile.  Don't know what's going on
-// there, but for now this is the workaround at the expense of code
-// bloat.
-template <typename T>
-TaskStatus MeshBlockData<T>::SetBoundaries() {
-  Kokkos::Profiling::pushRegion("Task_SetBoundaries_MeshBlockData");
-  // sets the boundary
-  for (auto &v : varVector_) {
-    if (v->IsSet(Metadata::FillGhost)) {
-      v->resetBoundary();
-      v->vbvar->SetBoundaries();
-    }
-  }
-
-  Kokkos::Profiling::popRegion(); // Task_SetBoundaries_MeshBlockData
-  return TaskStatus::complete;
-}
-
-template <typename T>
-void MeshBlockData<T>::ResetBoundaryCellVariables() {
-  Kokkos::Profiling::pushRegion("ResetBoundaryCellVariables");
-  for (auto &v : varVector_) {
-    if (v->IsSet(Metadata::FillGhost)) {
-      v->vbvar->var_cc = v->data;
-    }
-  }
-
-  Kokkos::Profiling::popRegion(); // ResetBoundaryCellVariables
-}
-
-template <typename T>
-TaskStatus MeshBlockData<T>::StartReceiving(BoundaryCommSubset phase) {
-  Kokkos::Profiling::pushRegion("Task_StartReceiving");
-  for (auto &v : varVector_) {
-    if (v->IsSet(Metadata::FillGhost)) {
-      v->resetBoundary();
-      v->vbvar->StartReceiving(phase);
-      v->mpiStatus = false;
-    }
-  }
-
-  Kokkos::Profiling::popRegion(); // Task_StartReceiving
-  return TaskStatus::complete;
-}
-
-template <typename T>
-TaskStatus MeshBlockData<T>::ClearBoundary(BoundaryCommSubset phase) {
-  Kokkos::Profiling::pushRegion("Task_ClearBoundary");
-  for (auto &v : varVector_) {
-    if (v->IsSet(Metadata::FillGhost)) {
-      v->vbvar->ClearBoundary(phase);
-    }
-  }
-
-  Kokkos::Profiling::popRegion(); // Task_ClearBoundary
-  return TaskStatus::complete;
-}
-
-template <typename T>
-TaskStatus MeshBlockData<T>::RestrictBoundaries() {
-  Kokkos::Profiling::pushRegion("RestrictBoundaries");
-  // TODO(JMM): Change this upon refactor of BoundaryValues
-  auto pmb = GetBlockPointer();
-  pmb->pbval->RestrictBoundaries();
-  Kokkos::Profiling::popRegion(); // RestrictBoundaries
-  return TaskStatus::complete;
-}
-
-template <typename T>
 void MeshBlockData<T>::ProlongateBoundaries() {
   Kokkos::Profiling::pushRegion("ProlongateBoundaries");
   // TODO(JMM): Change this upon refactor of BoundaryValues
@@ -604,9 +397,6 @@ void MeshBlockData<T>::Print() {
   std::cout << "Variables are:\n";
   for (auto v : varVector_) {
     std::cout << " cell: " << v->info() << std::endl;
-  }
-  for (auto v : faceVector_) {
-    std::cout << " face: " << v->info() << std::endl;
   }
 }
 

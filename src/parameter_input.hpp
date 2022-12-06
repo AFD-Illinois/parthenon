@@ -3,7 +3,7 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <ostream>
 #include <string>
+#include <unordered_map>
 
 #include "config.hpp"
 #include "defs.hpp"
@@ -94,9 +95,7 @@ class ParameterInput {
   int SetInteger(const std::string &block, const std::string &name, int value);
   Real GetReal(const std::string &block, const std::string &name);
   Real GetOrAddReal(const std::string &block, const std::string &name, Real value);
-  Real GetOrAddPrecise(const std::string &block, const std::string &name, Real value);
   Real SetReal(const std::string &block, const std::string &name, Real value);
-  Real SetPrecise(const std::string &block, const std::string &name, Real value);
   bool GetBoolean(const std::string &block, const std::string &name);
   bool GetOrAddBoolean(const std::string &block, const std::string &name, bool value);
   bool SetBoolean(const std::string &block, const std::string &name, bool value);
@@ -109,7 +108,7 @@ class ParameterInput {
   void ForwardNextTime(Real time);
   void CheckRequired(const std::string &block, const std::string &name);
   void CheckDesired(const std::string &block, const std::string &name);
-
+  std::unordered_map<std::string, std::string> GetBlockMap(const std::string &block);
  private:
   std::string last_filename_; // last input file opened, to prevent duplicate reads
 

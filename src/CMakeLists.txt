@@ -22,7 +22,7 @@ endif()
 # The following lines determine the default loop pattern by setting the
 # default defines to the appropriate "tags" in the config.hpp file.
 # See `kokkos_abstraction.hpp` for available tags and what they translate to.
-if (${Kokkos_ENABLE_CUDA})
+if (${Kokkos_ENABLE_CUDA} OR ${Kokkos_ENABLE_HIP})
   set(PAR_LOOP_LAYOUT "MANUAL1D_LOOP" CACHE STRING
     "Default loop layout for parallel_for wrapper")
 
@@ -39,7 +39,7 @@ elseif(${Kokkos_ENABLE_HPX})
   message( FATAL_ERROR "Need to add/fix/test default loop layouts for HPX backend.")
 
 else()
-  # use simd for loop when not using Nvidia GPUs
+  # use simd for loop when running on host
   set(PAR_LOOP_LAYOUT "SIMDFOR_LOOP" CACHE STRING
     "Default loop layout for parallel_for wrapper")
   set(PAR_LOOP_LAYOUT_VALUES "SIMDFOR_LOOP;MANUAL1D_LOOP;MDRANGE_LOOP;TPTTR_LOOP;TPTVR_LOOP;TPTTRTVR_LOOP"
@@ -81,6 +81,8 @@ if (${PAR_LOOP_INNER_LAYOUT} STREQUAL "TVR_INNER_LOOP")
   set(PAR_LOOP_INNER_LAYOUT_TAG inner_loop_pattern_tvr_tag)
 elseif (${PAR_LOOP_INNER_LAYOUT} STREQUAL "SIMDFOR_INNER_LOOP")
   set(PAR_LOOP_INNER_LAYOUT_TAG inner_loop_pattern_simdfor_tag)
+elseif (${PAR_LOOP_INNER_LAYOUT} STREQUAL "TTR_INNER_LOOP")
+  set(PAR_LOOP_INNER_LAYOUT_TAG inner_loop_pattern_ttr_tag)
 else()
   set(PAR_LOOP_INNER_LAYOUT_TAG loop_pattern_undefined_tag)
 endif()
@@ -95,16 +97,14 @@ set(COORDINATE_TYPE GRCoordinates) # TODO: Make this an option when more are ava
 configure_file(config.hpp.in generated/config.hpp @ONLY)
 
 add_library(parthenon
-  bvals/cc/bvals_cc.cpp
-  bvals/cc/bvals_cc.hpp
-  bvals/cc/bvals_cc_in_one.cpp
   bvals/cc/bvals_cc_in_one.hpp
-  bvals/cc/flux_correction_cc.cpp
-
-  bvals/fc/bvals_fc.cpp
-  bvals/fc/bvals_fc.hpp
-  bvals/fc/flux_correction_fc.cpp
-
+  bvals/cc/bvals_utils.hpp
+  bvals/cc/calc_indices.cpp
+  bvals/cc/sparse_bvals_cc_in_one.cpp
+  bvals/cc/sparse_flux_correction_cc_in_one.cpp 
+  bvals/cc/tag_map.cpp 
+  bvals/cc/tag_map.hpp 
+  
   bvals/boundary_conditions.cpp
   bvals/boundary_conditions.hpp
 
@@ -138,6 +138,9 @@ add_library(parthenon
   interface/metadata.cpp
   interface/metadata.hpp
   interface/params.hpp
+  interface/sparse_pack.hpp
+  interface/sparse_pack_base.cpp
+  interface/sparse_pack_base.hpp
   interface/sparse_pool.cpp
   interface/sparse_pool.hpp
   interface/state_descriptor.hpp
@@ -145,6 +148,7 @@ add_library(parthenon
   interface/update.cpp
   interface/update.hpp
   interface/variable_pack.hpp
+  interface/variable_state.hpp
   interface/variable.cpp
   interface/variable.hpp
 
@@ -152,6 +156,7 @@ add_library(parthenon
   mesh/domain.hpp
   mesh/mesh_refinement.cpp
   mesh/mesh_refinement.hpp
+  mesh/mesh_refinement_ops.hpp
   mesh/mesh.cpp
   mesh/mesh.hpp
   mesh/meshblock.hpp
@@ -187,7 +192,11 @@ add_library(parthenon
   refinement/refinement.cpp
   refinement/refinement.hpp
 
+  solvers/bicgstab_solver.hpp
   solvers/solver_utils.hpp
+  solvers/cg_solver.hpp
+  solvers/newton_krylov.hpp
+  solvers/solvers.cpp
 
   tasks/task_id.cpp
   tasks/task_id.hpp
@@ -199,13 +208,20 @@ add_library(parthenon
   utils/buffer_utils.cpp
   utils/buffer_utils.hpp
   utils/change_rundir.cpp
+  utils/communication_buffer.hpp
+  utils/cleantypes.hpp
+  utils/concepts_lite.hpp
   utils/error_checking.hpp
   utils/error_checking.cpp
+  utils/hash.hpp
   utils/mpi_types.hpp
+  utils/nan_payload_tag.hpp
+  utils/object_pool.hpp
   utils/partition_stl_containers.hpp
   utils/reductions.hpp
   utils/show_config.cpp
   utils/signal_handler.cpp
+  utils/sort.hpp
   utils/string_utils.cpp
   utils/string_utils.hpp
   utils/utils.hpp
@@ -218,6 +234,7 @@ add_library(parthenon
   kokkos_abstraction.hpp
   parameter_input.cpp
   parameter_input.hpp
+  parthenon_array_generic.hpp
   parthenon_manager.cpp
   parthenon_manager.hpp
   parthenon_mpi.hpp

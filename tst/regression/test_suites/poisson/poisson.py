@@ -19,7 +19,7 @@
 import sys
 import utils.test_case
 
-""" To prevent littering up imported folders with .pyc files or __pycache_ folder"""
+# To prevent littering up imported folders with .pyc files or __pycache_ folder
 sys.dont_write_bytecode = True
 
 
@@ -45,7 +45,8 @@ class TestCase(utils.test_case.TestCaseAbs):
                 "poisson.out0.00001.phdf",
                 parameters.parthenon_path
                 + "/tst/regression/gold_standard/poisson.out0.00001.phdf",
-            ]
+            ],
+            check_metadata=False,
         )
 
         return delta == 0

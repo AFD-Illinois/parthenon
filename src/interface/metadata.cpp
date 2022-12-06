@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -117,9 +117,9 @@ std::vector<MetadataFlag> Metadata::Flags() const {
   return set_flags;
 }
 
-std::array<int, 6> Metadata::GetArrayDims(std::weak_ptr<MeshBlock> wpmb) const {
+std::array<int, 6> Metadata::GetArrayDims(std::weak_ptr<MeshBlock> wpmb,
+                                          bool coarse) const {
   std::array<int, 6> arrDims;
-
   const auto &shape = shape_;
   const int N = shape.size();
 
@@ -133,13 +133,21 @@ std::array<int, 6> Metadata::GetArrayDims(std::weak_ptr<MeshBlock> wpmb) const {
                              "Cannot determine array dimensions for mesh-tied entity "
                              "without a valid meshblock");
     auto pmb = wpmb.lock();
-    arrDims[0] = pmb->cellbounds.ncellsi(IndexDomain::entire);
-    arrDims[1] = pmb->cellbounds.ncellsj(IndexDomain::entire);
-    arrDims[2] = pmb->cellbounds.ncellsk(IndexDomain::entire);
+    const auto bnds = coarse ? pmb->c_cellbounds : pmb->cellbounds;
+    arrDims[0] = bnds.ncellsi(IndexDomain::entire);
+    arrDims[1] = bnds.ncellsj(IndexDomain::entire);
+    arrDims[2] = bnds.ncellsk(IndexDomain::entire);
     for (int i = 0; i < N; i++)
       arrDims[i + 3] = shape[i];
     for (int i = N; i < 3; i++)
       arrDims[i + 3] = 1;
+  } else if (IsSet(Particle)) {
+    assert(N >= 1 && N <= 5);
+    arrDims[0] = 1; // To be updated by swarm based on pool size before allocation
+    for (int i = 0; i < N; i++)
+      arrDims[i + 1] = shape[i];
+    for (int i = N; i < 5; i++)
+      arrDims[i + 1] = 1;
   } else {
     // This variable is not necessarily tied to any specific
     // mesh element, so dims will be used as the actual array

@@ -14,9 +14,12 @@
 add_subdirectory(stochastic_subgrid)
 add_subdirectory(advection)
 add_subdirectory(calculate_pi)
-add_subdirectory(face_fields)
 add_subdirectory(kokkos_pi)
 add_subdirectory(particles)
 add_subdirectory(particle_leapfrog)
 add_subdirectory(particle_tracers)
 add_subdirectory(poisson)
+add_subdirectory(sparse_advection)
+add_subdirectory(poisson_cg)
+add_subdirectory(poisson_nonlinear)
+

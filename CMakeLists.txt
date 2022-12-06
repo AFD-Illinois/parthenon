@@ -1,5 +1,9 @@
 #=========================================================================================
-# (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+# Parthenon performance portable AMR framework
+# Copyright(C) 2020-2022 The Parthenon collaboration
+# Licensed under the 3-clause BSD License, see LICENSE file for details
+#=========================================================================================
+# (C) (or copyright) 2020-2022. Triad National Security, LLC. All rights reserved.
 #
 # This program was produced under U.S. Government contract 89233218CNA000001 for Los
 # Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -16,7 +20,7 @@ cmake_minimum_required(VERSION 3.16)
 # Imports machine-specific configuration
 include(cmake/MachineCfg.cmake)
 
-project(parthenon VERSION 0.6.1 LANGUAGES C CXX)
+project(parthenon VERSION 0.7.0 LANGUAGES C CXX)
 
 if (${CMAKE_VERSION} VERSION_GREATER_EQUAL 3.19.0)
   cmake_policy(SET CMP0110 NEW)
@@ -30,11 +34,10 @@ include(CTest)
 option(PARTHENON_SINGLE_PRECISION "Run in single precision" OFF)
 option(PARTHENON_DISABLE_MPI "MPI is enabled by default if found, set this to True to disable MPI" OFF)
 option(PARTHENON_ENABLE_HOST_COMM_BUFFERS "Allocate communication buffers on host" OFF)
-option(PARTHENON_ENABLE_INIT_PACKING "Use MeshBlockPack based buffer functions in \
-Mesh::Initialize. Does NOT support sparse variables." OFF)
 option(PARTHENON_DISABLE_OPENMP "OpenMP is enabled by default if found, set this to True to disable OpenMP" OFF)
 option(PARTHENON_DISABLE_HDF5 "HDF5 is enabled by default if found, set this to True to disable HDF5" OFF)
 option(PARTHENON_DISABLE_HDF5_COMPRESSION "HDF5 compression is enabled by default, set this to True to disable compression in HDF5 output/restart files" OFF)
+option(PARTHENON_DISABLE_SPARSE "Sparse capability is enabled by default, set this to True to compile-time disable all sparse capability" OFF)
 option(PARTHENON_LINT_DEFAULT "Linting is turned off by default, use the \"lint\" target or set \
 this to True to enable linting in the default target" OFF)
 option(PARTHENON_COPYRIGHT_CHECK_DEFAULT "Copyright check is turned off by default, use the \
@@ -67,9 +70,9 @@ include(cmake/Format.cmake)
 include(cmake/Lint.cmake)
 
 # regression test reference data
-set(REGRESSION_GOLD_STANDARD_VER 12 CACHE STRING "Version of gold standard to download and use")
+set(REGRESSION_GOLD_STANDARD_VER 13 CACHE STRING "Version of gold standard to download and use")
 set(REGRESSION_GOLD_STANDARD_HASH
-  "SHA512=d0071f40eec3a793cc188a19587f9dd915dbdc092c17a3aadd4ce82bd90cfb329043a61e194291f4f3c503fc83e7a9288462e89a90136d3d16dce27a1f099383"
+  "SHA512=e7713ea82a389c2ce3929263adcc6292659a8f80dde213dee9ef972a925e287d47db355a51ab94436ecdeec6c9976ed0c534c54ebad87cd9a0910fd5606b7554"
   CACHE STRING "Hash of default gold standard file to download")
 option(REGRESSION_GOLD_STANDARD_SYNC "Automatically sync gold standard files." ON)
 
@@ -132,8 +135,8 @@ if (NOT PARTHENON_DISABLE_OPENMP)
   # Using Host OpenMP and Cuda with nvcc currently does not compile with C++17 standard.
   # Also there is no proper support for two separate execution spaces in Parthenon right now.
   # We may need to revisit this logic when OpenMP target for devices will be used in the future.
-  if (Kokkos_ENABLE_CUDA)
-    message(STATUS "Parthenon is not using Host OpenMP because Cuda is enabled")
+  if (Kokkos_ENABLE_CUDA OR Kokkos_ENABLE_HIP)
+    message(STATUS "Parthenon is not using Host OpenMP because Cuda or HIP is enabled")
   else()
     find_package(OpenMP COMPONENTS CXX)
     if (NOT OpenMP_FOUND)
@@ -143,6 +146,11 @@ if (NOT PARTHENON_DISABLE_OPENMP)
     set(ENABLE_OPENMP ON)
     set(Kokkos_ENABLE_OPENMP ON CACHE BOOL "Allow Kokkos to use OpenMP as execution space.")
   endif()
+endif()
+
+set(ENABLE_SPARSE ON)
+if (PARTHENON_DISABLE_SPARSE)
+  set(ENABLE_SPARSE OFF)
 endif()
 
 if (Kokkos_ENABLE_CUDA AND TEST_INTEL_OPTIMIZATION)
@@ -165,8 +173,17 @@ if (NOT PARTHENON_DISABLE_HDF5)
   if (ENABLE_MPI AND (NOT HDF5_IS_PARALLEL))
     message(FATAL_ERROR "Both MPI and HDF5 are enabled but only a serial version of HDF5 "
     "was found. Please install a parallel version of HDF5 (or point CMake to it by adding its path "
-    "to the CMAKE_PREFIX_PATH environment variable), or disable either MPI or HDF5 by rerunning "
+    "to the CMAKE_PREFIX_PATH environment variable or by setting the HDF5_ROOT variable), "
+    "or disable either MPI or HDF5 by rerunning "
     "CMake with -DPARTHENON_DISABLE_MPI=ON or -DPARTHENON_DISABLE_HDF5=ON")
+  endif()
+
+  if ((NOT ENABLE_MPI) AND HDF5_IS_PARALLEL)
+    message(FATAL_ERROR "MPI is disabled and HDF5 is enabled but only a parallel version of HDF5 "
+    "was found. Please install a serial version of HDF5 (or point CMake to it by adding its path "
+    "to the CMAKE_PREFIX_PATH environment variable or by setting the HDF5_ROOT variable), or "
+    "either enable MPI or disable HDF5 by rerunning "
+    "CMake with -DPARTHENON_DISABLE_MPI=OFF or -DPARTHENON_DISABLE_HDF5=ON")
   endif()
 
   if ((NOT PARTHENON_DISABLE_HDF5_COMPRESSION) AND ENABLE_MPI)
@@ -261,6 +278,14 @@ if (NOT TARGET Kokkos::kokkos)
   endif()
 endif()
 
+if (Kokkos_ENABLE_SYCL)
+  message(WARNING
+    "SYCL backend is currently NOT tested in Parthenon due to lack of access to hardware. "
+    "It may or may not work. Use at your own risk. "
+    "Please get in contact for support."
+  )
+endif()
+
 # Build Tests and download Catch2
 if (${PARTHENON_ENABLE_UNIT_TESTS} OR ${PARTHENON_ENABLE_INTEGRATION_TESTS} OR ${PARTHENON_ENABLE_REGRESSION_TESTS} OR ${PARTHENON_ENABLE_PERFORMANCE_TESTS})
 
@@ -298,7 +323,7 @@ if (${PARTHENON_ENABLE_UNIT_TESTS} OR ${PARTHENON_ENABLE_INTEGRATION_TESTS} OR $
   endif()
 
   # Try finding an installed Catch2 first
-  find_package(Catch2 2.11.1 QUIET)
+  find_package(Catch2 2.13.8 QUIET)
 
   if (NOT Catch2_FOUND)
     # If Catch2 is not found, instead use the git submodule
@@ -314,7 +339,7 @@ if (${PARTHENON_ENABLE_UNIT_TESTS} OR ${PARTHENON_ENABLE_INTEGRATION_TESTS} OR $
     list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/external/Catch2/contrib")
   endif()
 
-  include(ParseAndAddCatchTests)
+  include(Catch)
   add_subdirectory(tst)
 endif()
 

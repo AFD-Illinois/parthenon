@@ -49,13 +49,11 @@ TaskCollection PoissonDriver::MakeTaskCollection(BlockList_t &blocks) {
     pmb->meshblock_data.Add("delta", base);
   }
 
-  int max_iters = pmesh->packages.Get("poisson_package")->Param<int>("max_iterations");
-  int check_interval =
-      pmesh->packages.Get("poisson_package")->Param<int>("check_interval");
-  bool fail_flag =
-      pmesh->packages.Get("poisson_package")->Param<bool>("fail_without_convergence");
-  bool warn_flag =
-      pmesh->packages.Get("poisson_package")->Param<bool>("warn_without_convergence");
+  auto pkg = pmesh->packages.Get("poisson_package");
+  auto max_iters = pkg->Param<int>("max_iterations");
+  auto check_interval = pkg->Param<int>("check_interval");
+  auto fail_flag = pkg->Param<bool>("fail_without_convergence");
+  auto warn_flag = pkg->Param<bool>("warn_without_convergence");
 
   const int num_partitions = pmesh->DefaultNumPartitions();
   TaskRegion &solver_region = tc.AddRegion(num_partitions);
@@ -69,6 +67,9 @@ TaskCollection PoissonDriver::MakeTaskCollection(BlockList_t &blocks) {
   vec_reduce.val.resize(10);
   for (int i = 0; i < 10; i++)
     vec_reduce.val[i] = 0;
+  // and a kokkos view just for fun
+  AllReduce<HostArray1D<Real>> *pview_reduce =
+      pkg->MutableParam<AllReduce<HostArray1D<Real>>>("view_reduce");
   int reg_dep_id;
   for (int i = 0; i < num_partitions; i++) {
     reg_dep_id = 0;
@@ -148,8 +149,9 @@ TaskCollection PoissonDriver::MakeTaskCollection(BlockList_t &blocks) {
     solver.SetCheckInterval(check_interval);
     solver.SetFailWithMaxIterations(fail_flag);
     solver.SetWarnWithMaxIterations(warn_flag);
-    auto start_recv = solver.AddTask(none, &MeshData<Real>::StartReceiving, md.get(),
-                                     BoundaryCommSubset::all);
+
+    auto start_recv = solver.AddTask(
+        none, parthenon::cell_centered_bvars::StartReceiveBoundaryBuffers, md);
 
     auto update = solver.AddTask(mat_elem, poisson_package::UpdatePhi<MeshData<Real>>,
                                  md.get(), mdelta.get());
@@ -183,11 +185,9 @@ TaskCollection PoissonDriver::MakeTaskCollection(BlockList_t &blocks) {
 
     auto setb = solver.AddTask(recv | update, cell_centered_bvars::SetBoundaries, md);
 
-    auto clear = solver.AddTask(send | setb | report_norm, &MeshData<Real>::ClearBoundary,
-                                md.get(), BoundaryCommSubset::all);
-
     auto check = solver.SetCompletionTask(
-        clear, poisson_package::CheckConvergence<MeshData<Real>>, md.get(), mdelta.get());
+        send | setb | report_norm, poisson_package::CheckConvergence<MeshData<Real>>,
+        md.get(), mdelta.get());
     // mark task so that dependent tasks (below) won't execute
     // until all task lists have completed it
     solver_region.AddRegionalDependencies(reg_dep_id, i, check);
@@ -243,6 +243,39 @@ TaskCollection PoissonDriver::MakeTaskCollection(BlockList_t &blocks) {
                                  },
                                  &vec_reduce.val)
                            : none);
+
+    // And lets do a view reduce too just for fun
+    // The views are filled in the package
+    TaskID start_view_reduce =
+        (i == 0 ? tl.AddTask(none, &AllReduce<HostArray1D<Real>>::StartReduce,
+                             pview_reduce, MPI_SUM)
+                : none);
+    // test the reduction until it completes
+    TaskID finish_view_reduce = tl.AddTask(
+        start_view_reduce, &AllReduce<HostArray1D<Real>>::CheckReduce, pview_reduce);
+    solver_region.AddRegionalDependencies(reg_dep_id, i, finish_view_reduce);
+    reg_dep_id++;
+
+    auto report_view = (i == 0 && Globals::my_rank == 0
+                            ? tl.AddTask(
+                                  finish_view_reduce,
+                                  [num_partitions](HostArray1D<Real> *view) {
+                                    auto &v = *view;
+                                    std::cout << "View reduction: ";
+                                    for (int n = 0; n < v.size(); n++) {
+                                      std::cout << v(n) << " ";
+                                    }
+                                    std::cout << std::endl;
+                                    std::cout << "Should be:     ";
+                                    for (int n = 0; n < v.size(); n++) {
+                                      std::cout << n * num_partitions * Globals::nranks
+                                                << " ";
+                                    }
+                                    std::cout << std::endl;
+                                    return TaskStatus::complete;
+                                  },
+                                  &(pview_reduce->val))
+                            : none);
   }
 
   return tc;
