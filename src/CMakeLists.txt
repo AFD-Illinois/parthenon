@@ -183,6 +183,9 @@ add_library(parthenon
   outputs/outputs.cpp
   outputs/outputs.hpp
   outputs/parthenon_hdf5.cpp
+  outputs/parthenon_hdf5_attributes.cpp
+  outputs/parthenon_hdf5_attributes_read.cpp
+  outputs/parthenon_hdf5_attributes_write.cpp
   outputs/parthenon_xdmf.cpp
   outputs/parthenon_hdf5.hpp
   outputs/parthenon_xdmf.hpp
@@ -213,10 +216,8 @@ add_library(parthenon
   solvers/mg_solver.hpp
   solvers/solver_utils.hpp
 
-  tasks/task_id.cpp
-  tasks/task_id.hpp
-  tasks/task_list.hpp
-  tasks/task_types.hpp
+  tasks/tasks.hpp
+  tasks/thread_pool.hpp
 
   time_integration/butcher_integrator.cpp
   time_integration/low_storage_integrator.cpp
@@ -233,10 +234,13 @@ add_library(parthenon
   utils/communication_buffer.hpp
   utils/cleantypes.hpp
   utils/concepts_lite.hpp
-  utils/error_checking.hpp
   utils/error_checking.cpp
+  utils/error_checking.hpp
   utils/hash.hpp
+  utils/index_split.cpp
+  utils/index_split.hpp
   utils/indexer.hpp
+  utils/instrument.hpp
   utils/loop_utils.hpp
   utils/morton_number.hpp
   utils/mpi_types.hpp
@@ -309,7 +313,7 @@ if (Kokkos_ENABLE_CUDA AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
    target_compile_options(parthenon PUBLIC --expt-relaxed-constexpr)
 endif()
 
-target_link_libraries(parthenon PUBLIC Kokkos::kokkos)
+target_link_libraries(parthenon PUBLIC Kokkos::kokkos Threads::Threads)
 
 if (PARTHENON_ENABLE_ASCENT)
   if (ENABLE_MPI)
