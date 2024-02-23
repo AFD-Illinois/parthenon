@@ -14,43 +14,35 @@
 // license in this material to reproduce, prepare derivative works, distribute copies to
 // the public, perform publicly and display publicly, and to permit others to do so.
 //========================================================================================
-#ifndef PARTHENON_ARRAYS_HPP_
-#define PARTHENON_ARRAYS_HPP_
 
-#include <cassert>
-#include <cstddef>
-#include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
-#include <Kokkos_Core.hpp>
-
-#include "basic_types.hpp"
-#include "kokkos_abstraction.hpp"
-#include "parthenon_array_generic.hpp"
-#include "utils/multi_pointer.hpp"
-
-// Macro for automatically creating a useful name
-#define PARARRAY_TEMP                                                                    \
-  "ParArrayND:" + std::string(__FILE__) + ":" + std::to_string(__LINE__)
+#include "parthenon_arrays.hpp"
 
 namespace parthenon {
 
-template <typename T, typename State = empty_state_t, typename Layout = LayoutWrapper>
-using ParArrayND = ParArrayGeneric<device_view_t<T, Layout>, State>;
+#define PARTHENON_ARRAY_SPEC(T)                                                          \
+  template class ParArrayGeneric<device_view_t<T, LayoutWrapper>, empty_state_t>
 
-template <typename T, typename State = empty_state_t, typename Layout = LayoutWrapper>
-using ParArrayHost = ParArrayGeneric<host_view_t<T, Layout>, State>;
+PARTHENON_ARRAY_SPEC(float);
+PARTHENON_ARRAY_SPEC(double);
 
-#define PARTHENON_ARRAY_DECL(T)                                                          \
-  extern template class ParArrayGeneric<device_view_t<T, LayoutWrapper>, empty_state_t>
-
-PARTHENON_ARRAY_DECL(float);
-PARTHENON_ARRAY_DECL(double);
-
-#undef PARTHENON_ARRAY_DECL
+#undef PARTHENON_ARRAY_SPEC
 
 } // namespace parthenon
 
-#endif // PARTHENON_ARRAYS_HPP_
+#ifdef PARTHENON_PRE_INSTANTIATE_KOKKOS_VIEWS
+namespace Kokkos {
+// the most common ones
+#define PARTHENON_VIEW_TYPE_INSTANTIATION(T)                                             \
+  template class View<T *, parthenon::LayoutWrapper, parthenon::DevMemSpace>;            \
+  template class View<T **, parthenon::LayoutWrapper, parthenon::DevMemSpace>;           \
+  template class View<T ***, parthenon::LayoutWrapper, parthenon::DevMemSpace>;          \
+  template class View<T ****, parthenon::LayoutWrapper, parthenon::DevMemSpace>;         \
+  template class View<parthenon::multi_pointer_t<T, parthenon::MAX_VARIABLE_DIMENSION>,  \
+                      parthenon::LayoutWrapper, parthenon::DevMemSpace>
+
+PARTHENON_VIEW_TYPE_INSTANTIATION(float);
+PARTHENON_VIEW_TYPE_INSTANTIATION(double);
+
+#undef PARTHENON_VIEW_TYPE_INSTANTIATION
+} // namespace Kokkos
+#endif // PARTHENON_PRE_INSTANTIATE_KOKKOS_VIEWS

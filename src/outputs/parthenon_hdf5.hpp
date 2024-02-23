@@ -30,23 +30,20 @@
 // not manipulating this list in any way.
 #define PARTHENON_ATTR_VALID_VEC_TYPES(T)                                                \
   T, std::vector<T>, ParArray1D<T>, ParArray2D<T>, ParArray3D<T>, ParArray4D<T>,         \
-      ParArray5D<T>, ParArray6D<T>, ParArray7D<T>, ParArray8D<T>, HostArray1D<T>,        \
-      HostArray2D<T>, HostArray3D<T>, HostArray4D<T>, HostArray5D<T>, HostArray6D<T>,    \
-      HostArray7D<T>, Kokkos::View<T *>, Kokkos::View<T **>, ParArrayND<T>,              \
-      ParArrayHost<T>
+      HostArray1D<T>, HostArray2D<T>, HostArray3D<T>, HostArray4D<T>, Kokkos::View<T *>, \
+      Kokkos::View<T **>, ParArrayND<T>, ParArrayHost<T>
 // JMM: This is the list of template specializations we
 // "pre-instantiate" We only pre-instantiate device memory, not host
 // memory. The reason is that when building with the Kokkos serial
 // backend, DevMemSpace and HostMemSpace are the same and so this
 // resolves to the same type in the macro, which causes problems.
-#define PARTHENON_ATTR_FOREACH_VECTOR_TYPE(T)                               \
-  PARTHENON_ATTR_APPLY(T);                                                  \
-  PARTHENON_ATTR_APPLY(Kokkos::View<T *, LayoutWrapper, DevMemSpace>);      \
-  PARTHENON_ATTR_APPLY(Kokkos::View<T **, LayoutWrapper, DevMemSpace>);     \
-  PARTHENON_ATTR_APPLY(Kokkos::View<T ***, LayoutWrapper, DevMemSpace>);    \
-  PARTHENON_ATTR_APPLY(Kokkos::View<T ****, LayoutWrapper, DevMemSpace>);   \
-  PARTHENON_ATTR_APPLY(Kokkos::View<T *****, LayoutWrapper, DevMemSpace>);  \
-  PARTHENON_ATTR_APPLY(Kokkos::View<T ******, LayoutWrapper, DevMemSpace>)
+#define PARTHENON_ATTR_FOREACH_VECTOR_TYPE(T)                                            \
+  PARTHENON_ATTR_APPLY(T);                                                               \
+  PARTHENON_ATTR_APPLY(Kokkos::View<T *, LayoutWrapper, DevMemSpace>);                   \
+  PARTHENON_ATTR_APPLY(Kokkos::View<T **, LayoutWrapper, DevMemSpace>);                  \
+  PARTHENON_ATTR_APPLY(Kokkos::View<T ***, LayoutWrapper, DevMemSpace>);                 \
+  PARTHENON_ATTR_APPLY(Kokkos::View<T ****, LayoutWrapper, DevMemSpace>);                \
+  PARTHENON_ATTR_APPLY(Kokkos::View<T *******, LayoutWrapper, DevMemSpace>)
 // Only proceed if HDF5 output enabled
 #ifdef ENABLE_HDF5
 
@@ -368,9 +365,11 @@ void HDF5ReadAttribute(hid_t location, const std::string &name, std::vector<T> &
 }
 
 // Template extern declarations ensuring these are instantiated elsewhere
-#define PARTHENON_ATTR_APPLY(...)                                                                                          \
-  extern template void HDF5ReadAttribute<__VA_ARGS__>(hid_t location, const std::string &name, __VA_ARGS__ &val);          \
-  extern template void HDF5WriteAttribute<__VA_ARGS__>(const std::string &name, const __VA_ARGS__ &value, hid_t location)
+#define PARTHENON_ATTR_APPLY(...)                                                        \
+  extern template void HDF5ReadAttribute<__VA_ARGS__>(                                   \
+      hid_t location, const std::string &name, __VA_ARGS__ &val);                        \
+  extern template void HDF5WriteAttribute<__VA_ARGS__>(                                  \
+      const std::string &name, const __VA_ARGS__ &value, hid_t location)
 
 PARTHENON_ATTR_FOREACH_VECTOR_TYPE(bool);
 PARTHENON_ATTR_FOREACH_VECTOR_TYPE(int32_t);
