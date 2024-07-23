@@ -3,7 +3,7 @@
 // Copyright(C) 2022 The Parthenon collaboration
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2022-2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2022-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -39,8 +39,8 @@ inline std::tuple<int, int, std::string, int>
 SendKey(const MeshBlock *pmb, const NeighborBlock &nb,
         const std::shared_ptr<Variable<Real>> &pcv) {
   const int sender_id = pmb->gid;
-  const int receiver_id = nb.snb.gid;
-  const int location_idx = (1 + nb.ni.ox1) + 3 * (1 + nb.ni.ox2 + 3 * (1 + nb.ni.ox3));
+  const int receiver_id = nb.gid;
+  const int location_idx = nb.offsets.GetIdx();
   return {sender_id, receiver_id, pcv->label(), location_idx};
 }
 
@@ -48,8 +48,8 @@ inline std::tuple<int, int, std::string, int>
 ReceiveKey(const MeshBlock *pmb, const NeighborBlock &nb,
            const std::shared_ptr<Variable<Real>> &pcv) {
   const int receiver_id = pmb->gid;
-  const int sender_id = nb.snb.gid;
-  const int location_idx = (1 - nb.ni.ox1) + 3 * (1 - nb.ni.ox2 + 3 * (1 - nb.ni.ox3));
+  const int sender_id = nb.gid;
+  const int location_idx = nb.lcoord_trans.Transform(nb.offsets).GetReverseIdx();
   return {sender_id, receiver_id, pcv->label(), location_idx};
 }
 
@@ -103,6 +103,13 @@ void InitializeBufferCache(std::shared_ptr<MeshData<Real>> &md, COMM_MAP *comm_m
   pcache->buf_vec.clear();
   pcache->idx_vec = std::vector<std::size_t>(key_order.size());
   std::for_each(std::begin(key_order), std::end(key_order), [&](auto &t) {
+    if (comm_map->count(std::get<2>(t)) == 0) {
+      auto key = std::get<2>(t);
+      PARTHENON_FAIL(std::string("Asking for buffer that doesn't exist") +
+                     " (sender: " + std::to_string(std::get<0>(key)) + ", receiver: " +
+                     std::to_string(std::get<1>(key)) + ", var: " + std::get<2>(key) +
+                     ", location: " + std::to_string(std::get<3>(key)) + ")");
+    }
     pcache->buf_vec.push_back(&((*comm_map)[std::get<2>(t)]));
     (pcache->idx_vec)[std::get<1>(t)] = buff_idx++;
   });
@@ -139,7 +146,7 @@ inline auto CheckSendBufferCacheForRebuild(std::shared_ptr<MeshData<Real>> md) {
     }
 
     if (ibuf < cache.bnd_info_h.size()) {
-      if (cache.bnd_info_h(ibuf).allocated != v->IsAllocated()) rebuild = true;
+      if (cache.bnd_info_h(ibuf).alloc_status != v->GetAllocationStatus()) rebuild = true;
       rebuild = rebuild || !UsingSameResource(cache.bnd_info_h(ibuf).buf, buf.buffer());
     } else {
       rebuild = true;
@@ -162,7 +169,7 @@ inline auto CheckReceiveBufferCacheForRebuild(std::shared_ptr<MeshData<Real>> md
     const std::size_t ibuf = cache.idx_vec[nbound];
     auto &buf = *cache.buf_vec[ibuf];
     if (ibuf < cache.bnd_info_h.size()) {
-      if (cache.bnd_info_h(ibuf).allocated != v->IsAllocated()) rebuild = true;
+      if (cache.bnd_info_h(ibuf).alloc_status != v->GetAllocationStatus()) rebuild = true;
       rebuild = rebuild || !UsingSameResource(cache.bnd_info_h(ibuf).buf, buf.buffer());
 
       if ((buf.GetState() == BufferState::received) &&
@@ -205,10 +212,7 @@ inline void RebuildBufferCache(std::shared_ptr<MeshData<Real>> md, int nbound,
   // this.
   Mesh *pmesh = md->GetParentPointer();
   StateDescriptor *pkg = (pmesh->resolved_packages).get();
-  if constexpr (!((BOUND_TYPE == BoundaryType::flxcor_send) ||
-                  (BOUND_TYPE == BoundaryType::flxcor_recv))) {
-    cache.prores_cache.Initialize(nbound, pkg);
-  }
+  cache.prores_cache.Initialize(nbound, pkg);
 
   int ibound = 0;
   ForEachBoundary<BOUND_TYPE>(md, [&](auto pmb, sp_mbd_t rc, nb_t &nb, const sp_cv_t v) {
@@ -219,19 +223,13 @@ inline void RebuildBufferCache(std::shared_ptr<MeshData<Real>> md, int nbound,
     // subsets ordering is same as in cache.bnd_info
     // RefinementFunctions_t owns all relevant functionality, so
     // only one ParArray2D needed.
-    if constexpr (!((BOUND_TYPE == BoundaryType::flxcor_send) ||
-                    (BOUND_TYPE == BoundaryType::flxcor_recv))) {
-      cache.prores_cache.RegisterRegionHost(ibuf, ProResInfoCreator(pmb, nb, v), v.get(),
-                                            pkg);
-    }
+    cache.prores_cache.RegisterRegionHost(ibuf, ProResInfoCreator(pmb, nb, v), v.get(),
+                                          pkg);
 
     ++ibound;
   });
   Kokkos::deep_copy(cache.bnd_info, cache.bnd_info_h);
-  if constexpr (!((BOUND_TYPE == BoundaryType::flxcor_send) ||
-                  (BOUND_TYPE == BoundaryType::flxcor_recv))) {
-    cache.prores_cache.CopyToDevice();
-  }
+  cache.prores_cache.CopyToDevice();
 }
 
 } // namespace parthenon

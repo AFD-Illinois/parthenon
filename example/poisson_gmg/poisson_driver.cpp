@@ -77,18 +77,18 @@ TaskCollection PoissonDriver::MakeTaskCollection(BlockList_t &blocks) {
       pkg->MutableParam<parthenon::solvers::BiCGSTABSolver<u, rhs, PoissonEquation>>(
           "MGBiCGSTABsolver");
 
-  const int num_partitions = pmesh->DefaultNumPartitions();
+  auto partitions = pmesh->GetDefaultBlockPartitions();
+  const int num_partitions = partitions.size();
   TaskRegion &region = tc.AddRegion(num_partitions);
-  int reg_dep_id = 0;
   for (int i = 0; i < num_partitions; ++i) {
     TaskList &tl = region[i];
-    auto &md = pmesh->mesh_data.GetOrAdd("base", i);
+    auto &md = pmesh->mesh_data.Add("base", partitions[i]);
 
     // Possibly set rhs <- A.u_exact for a given u_exact so that the exact solution is
     // known when we solve A.u = rhs
     auto get_rhs = none;
     if (use_exact_rhs) {
-      auto copy_exact = tl.AddTask(get_rhs, solvers::utils::CopyData<exact, u>, md);
+      auto copy_exact = tl.AddTask(get_rhs, TF(solvers::utils::CopyData<exact, u>), md);
       auto comm = AddBoundaryExchangeTasks<BoundaryType::any>(copy_exact, tl, md, true);
       PoissonEquation eqs;
       eqs.do_flux_cor = flux_correct;
@@ -96,14 +96,15 @@ TaskCollection PoissonDriver::MakeTaskCollection(BlockList_t &blocks) {
     }
 
     // Set initial solution guess to zero
-    auto zero_u = tl.AddTask(get_rhs, solvers::utils::SetToZero<u>, md);
+    auto zero_u = tl.AddTask(get_rhs, TF(solvers::utils::SetToZero<u>), md);
 
     auto solve = zero_u;
-    auto &itl = tl.AddIteration("Solver");
     if (solver == "BiCGSTAB") {
-      solve = bicgstab_solver->AddTasks(tl, itl, zero_u, i, pmesh, region, reg_dep_id);
+      auto setup = bicgstab_solver->AddSetupTasks(tl, zero_u, i, pmesh);
+      solve = bicgstab_solver->AddTasks(tl, setup, pmesh, i);
     } else if (solver == "MG") {
-      solve = mg_solver->AddTasks(tl, itl, zero_u, i, pmesh, region, reg_dep_id);
+      auto setup = mg_solver->AddSetupTasks(tl, zero_u, i, pmesh);
+      solve = mg_solver->AddTasks(tl, setup, pmesh, i);
     } else {
       PARTHENON_FAIL("Unknown solver type.");
     }
@@ -111,10 +112,9 @@ TaskCollection PoissonDriver::MakeTaskCollection(BlockList_t &blocks) {
     // If we are using a rhs to which we know the exact solution, compare our computed
     // solution to the exact solution
     if (use_exact_rhs) {
-      auto diff = tl.AddTask(solve, solvers::utils::AddFieldsAndStore<exact, u, u>, md,
-                             1.0, -1.0);
-      auto get_err =
-          solvers::utils::DotProduct<u, u>(diff, region, tl, i, reg_dep_id, &err, md);
+      auto diff = tl.AddTask(solve, TF(solvers::utils::AddFieldsAndStore<exact, u, u>),
+                             md, 1.0, -1.0);
+      auto get_err = solvers::utils::DotProduct<u, u>(diff, tl, &err, md);
       tl.AddTask(
           get_err,
           [](PoissonDriver *driver, int partition) {
@@ -128,7 +128,6 @@ TaskCollection PoissonDriver::MakeTaskCollection(BlockList_t &blocks) {
           this, i);
     }
   }
-
   return tc;
 }
 

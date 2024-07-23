@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -212,7 +212,7 @@ TEST_CASE("Metadata FlagCollection", "[Metadata]") {
 TEST_CASE("Refinement Information in Metadata", "[Metadata]") {
   GIVEN("A metadata struct with relevant flags set") {
     Metadata m({Metadata::Cell, Metadata::FillGhost});
-    THEN("It knows it's registered for refinement") { REQUIRE(m.IsRefined()); }
+    THEN("It knows it's registered for refinement") { REQUIRE(m.HasRefinementOps()); }
     THEN("It has the default Prolongation/Restriction ops") {
       const auto cell_funcs = parthenon::refinement::RefinementFunctions_t::RegisterOps<
           parthenon::refinement_ops::ProlongateSharedMinMod,
@@ -226,18 +226,6 @@ TEST_CASE("Refinement Information in Metadata", "[Metadata]") {
             parthenon::refinement::RefinementFunctions_t::RegisterOps<MyProlongOp,
                                                                       MyRestrictOp>();
         REQUIRE(m.GetRefinementFunctions() == my_funcs);
-      }
-    }
-  }
-  // JMM: I also wanted to test registration of refinement operations
-  // but this turns out to be impossible because Catch2 macros are not
-  // careful with commas, and the macro interprets commas within the
-  // template as separate arguments.
-  GIVEN("A metadata struct without the relevant flags set") {
-    Metadata m;
-    WHEN("We try to request refinement functions") {
-      THEN("It should fail") {
-        REQUIRE_THROWS_AS(m.GetRefinementFunctions(), std::runtime_error);
       }
     }
   }

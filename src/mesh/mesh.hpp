@@ -3,7 +3,7 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2020-2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -45,8 +45,9 @@
 #include "interface/mesh_data.hpp"
 #include "interface/state_descriptor.hpp"
 #include "kokkos_abstraction.hpp"
+#include "mesh/forest/forest.hpp"
+#include "mesh/forest/forest_topology.hpp"
 #include "mesh/meshblock_pack.hpp"
-#include "mesh/meshblock_tree.hpp"
 #include "outputs/io_wrapper.hpp"
 #include "parameter_input.hpp"
 #include "parthenon_arrays.hpp"
@@ -58,7 +59,6 @@
 namespace parthenon {
 
 // Forward declarations
-class BoundaryValues;
 class MeshBlock;
 class MeshRefinement;
 class ParameterInput;
@@ -75,10 +75,14 @@ class Mesh {
   friend class RestartOutput;
   friend class HistoryOutput;
   friend class MeshBlock;
-  friend class MeshBlockTree;
-  friend class BoundaryBase;
-  friend class BoundaryValues;
   friend class MeshRefinement;
+
+  struct base_constructor_selector_t {};
+  Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
+       base_constructor_selector_t);
+  struct hyper_rectangular_constructor_selector_t {};
+  Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
+       hyper_rectangular_constructor_selector_t);
 
  public:
   // 2x function overloads of ctor: normal and restarted simulation
@@ -86,6 +90,8 @@ class Mesh {
        int test_flag = 0);
   Mesh(ParameterInput *pin, ApplicationInput *app_in, RestartReader &resfile,
        Packages_t &packages, int test_flag = 0);
+  Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
+       forest::ForestDefinition &forest_def);
   ~Mesh();
 
   // accessors
@@ -96,16 +102,21 @@ class Mesh {
   std::int64_t GetTotalCells();
   // TODO(JMM): Move block_size into mesh.
   int GetNumberOfMeshBlockCells() const;
-  const RegionSize &GetBlockSize() const;
-  RegionSize GetBlockSize(const LogicalLocation &loc) const;
+  const RegionSize &GetDefaultBlockSize() const { return base_block_size; }
+  RegionSize GetBlockSize(const LogicalLocation &loc) const {
+    return forest.GetBlockDomain(loc);
+  }
+  const IndexShape &GetLeafBlockCellBounds(CellLevel level = CellLevel::same) const;
+
+  const forest::Forest &Forest() const { return forest; }
 
   // data
   bool modified;
-  const bool is_restart;
+  bool is_restart;
   RegionSize mesh_size;
   RegionSize base_block_size;
-  BoundaryFlag mesh_bcs[BOUNDARY_NFACES];
-  const int ndim; // number of dimensions
+  std::array<BoundaryFlag, BOUNDARY_NFACES> mesh_bcs;
+  int ndim; // number of dimensions
   const bool adaptive, multilevel, multigrid;
   int nbtotal, nbnew, nbdel;
   std::uint64_t mbcnt;
@@ -120,15 +131,13 @@ class Mesh {
 
   DataCollection<MeshData<Real>> mesh_data;
 
-  LogicalLocMap_t leaf_grid_locs;
-  std::vector<LogicalLocMap_t> gmg_grid_locs;
-  std::vector<BlockList_t> gmg_block_lists;
-  std::vector<DataCollection<MeshData<Real>>> gmg_mesh_data;
-  int GetGMGMaxLevel() { return gmg_grid_locs.size() - 1; }
-  int GetGMGMinLogicalLevel() { return gmg_min_logical_level_; }
+  std::map<int, BlockList_t> gmg_block_lists;
+  int GetGMGMaxLevel() const { return current_level; }
+  int GetGMGMinLevel() const { return gmg_min_logical_level_; }
 
   // functions
   void Initialize(bool init_problem, ParameterInput *pin, ApplicationInput *app_in);
+
   bool SetBlockSizeAndBoundaries(LogicalLocation loc, RegionSize &block_size,
                                  BoundaryFlag *block_bcs);
   void OutputCycleDiagnostics();
@@ -140,6 +149,12 @@ class Mesh {
   int DefaultNumPartitions() {
     return partition::partition_impl::IntCeil(block_list.size(), DefaultPackSize());
   }
+
+  const std::vector<std::shared_ptr<BlockListPartition>> &
+  GetDefaultBlockPartitions(GridIdentifier grid = GridIdentifier::leaf()) const {
+    return block_partitions_.at(grid);
+  }
+
   // step 7: create new MeshBlock list (same MPI rank but diff level: create new block)
   // Moved here given Cuda/nvcc restriction:
   // "error: The enclosing parent function ("...")
@@ -151,27 +166,30 @@ class Mesh {
 
   std::shared_ptr<MeshBlock> FindMeshBlock(int tgid) const;
 
-  void ApplyUserWorkBeforeOutput(ParameterInput *pin);
+  void ApplyUserWorkBeforeOutput(Mesh *mesh, ParameterInput *pin, SimTime const &time);
 
-  // Boundary Functions
-  BValFunc MeshBndryFnctn[BOUNDARY_NFACES];
-  SBValFunc SwarmBndryFnctn[BOUNDARY_NFACES];
-  std::array<std::vector<BValFunc>, BOUNDARY_NFACES> UserBoundaryFunctions;
+  void ApplyUserWorkBeforeRestartOutput(Mesh *mesh, ParameterInput *pin,
+                                        SimTime const &time, OutputParameters *pparams);
 
   // defined in either the prob file or default_pgen.cpp in ../pgen/
   std::function<void(Mesh *, ParameterInput *, MeshData<Real> *)> ProblemGenerator =
       nullptr;
+  std::function<void(Mesh *, ParameterInput *, MeshData<Real> *)> PostInitialization =
+      nullptr;
   static void UserWorkAfterLoopDefault(Mesh *mesh, ParameterInput *pin,
                                        SimTime &tm); // called in main loop
-  std::function<void(Mesh *, ParameterInput *, SimTime &)> UserWorkAfterLoop =
-      &UserWorkAfterLoopDefault;
-  static void UserWorkInLoopDefault(
-      Mesh *, ParameterInput *,
-      SimTime const &); // default behavior for pre- and post-step user work
+  std::function<void(Mesh *, ParameterInput *, SimTime &)> UserWorkAfterLoop = nullptr;
   std::function<void(Mesh *, ParameterInput *, SimTime &)> PreStepUserWorkInLoop =
-      &UserWorkInLoopDefault;
+      nullptr;
   std::function<void(Mesh *, ParameterInput *, SimTime const &)> PostStepUserWorkInLoop =
-      &UserWorkInLoopDefault;
+      nullptr;
+
+  std::function<void(Mesh *, ParameterInput *, SimTime const &)>
+      UserMeshWorkBeforeOutput = nullptr;
+
+  std::function<void(Mesh *, ParameterInput *, SimTime const &,
+                     OutputParameters *pparams)>
+      UserWorkBeforeRestartOutput = nullptr;
 
   static void PreStepUserDiagnosticsInLoopDefault(Mesh *, ParameterInput *,
                                                   SimTime const &);
@@ -183,17 +201,17 @@ class Mesh {
       PostStepUserDiagnosticsInLoop = PostStepUserDiagnosticsInLoopDefault;
 
   int GetRootLevel() const noexcept { return root_level; }
-  RootGridInfo GetRootGridInfo() const noexcept {
-    return RootGridInfo(
-        root_level, nrbx[0], nrbx[1], nrbx[2],
-        mesh_bcs[BoundaryFace::inner_x1] == BoundaryFlag::periodic && ndim > 0,
-        mesh_bcs[BoundaryFace::inner_x2] == BoundaryFlag::periodic && ndim > 1,
-        mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::periodic && ndim > 2);
+  int GetLegacyTreeRootLevel() const {
+    return forest.root_level + forest.forest_level.value();
   }
+
   int GetMaxLevel() const noexcept { return max_level; }
   int GetCurrentLevel() const noexcept { return current_level; }
   std::vector<int> GetNbList() const noexcept { return nblist; }
   std::vector<LogicalLocation> GetLocList() const noexcept { return loclist; }
+
+  std::pair<std::vector<std::int64_t>, std::vector<std::int64_t>>
+  GetLevelsAndLogicalLocationsFlat() const noexcept;
 
   void OutputMeshStructure(const int dim, const bool dump_mesh_structure = true);
 
@@ -204,7 +222,7 @@ class Mesh {
   std::unordered_map<int, buf_pool_t<Real>> pool_map;
   using comm_buf_map_t =
       std::unordered_map<channel_key_t, comm_buf_t, tuple_hash<channel_key_t>>;
-  comm_buf_map_t boundary_comm_map, boundary_comm_flxcor_map;
+  comm_buf_map_t boundary_comm_map;
   TagMap tag_map;
 
 #ifdef MPI_PARALLEL
@@ -234,6 +252,8 @@ class Mesh {
     return resolved_packages->GetVariableNames(std::forward<Args>(args)...);
   }
 
+  forest::Forest forest;
+
  private:
   // data
   int root_level, max_level, current_level;
@@ -257,10 +277,6 @@ class Mesh {
   // the last 4x should be std::size_t, but are limited to int by MPI
 
   std::vector<LogicalLocation> loclist;
-  MeshBlockTree tree;
-  // number of MeshBlocks in the x1, x2, x3 directions of the root grid:
-  // (unlike LogicalLocation.lxi, nrbxi don't grow w/ AMR # of levels, so keep 32-bit int)
-  std::array<int, 3> nrbx;
 
   // flags are false if using non-uniform or user meshgen function
   bool use_uniform_meshgen_fn_[4];
@@ -281,6 +297,11 @@ class Mesh {
 #endif
 
   // functions
+  void CheckMeshValidity() const;
+  void BuildBlockList(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
+                      int mesh_test,
+                      const std::unordered_map<LogicalLocation, int> &dealloc_count = {});
+  void DoStaticRefinement(ParameterInput *pin);
   void CalculateLoadBalance(std::vector<double> const &costlist,
                             std::vector<int> &ranklist, std::vector<int> &nslist,
                             std::vector<int> &nblist);
@@ -292,42 +313,28 @@ class Mesh {
   bool GatherCostListAndCheckBalance();
   void RedistributeAndRefineMeshBlocks(ParameterInput *pin, ApplicationInput *app_in,
                                        int ntot);
-  void BuildGMGHierarchy(int nbs, ParameterInput *pin, ApplicationInput *app_in);
+  void BuildGMGBlockLists(ParameterInput *pin, ApplicationInput *app_in);
+  void SetGMGNeighbors();
   void
-  SetSameLevelNeighbors(BlockList_t &block_list, const LogicalLocMap_t &loc_map,
-                        RootGridInfo root_grid, int nbs, bool gmg_neighbors,
-                        int composite_logical_level = 0,
+  SetMeshBlockNeighbors(GridIdentifier grid_id, BlockList_t &block_list,
+                        const std::vector<int> &ranklist,
                         const std::unordered_set<LogicalLocation> &newly_refined = {});
-  // defined in either the prob file or default_pgen.cpp in ../pgen/
-  static void InitUserMeshDataDefault(Mesh *mesh, ParameterInput *pin);
-  std::function<void(Mesh *, ParameterInput *)> InitUserMeshData =
-      InitUserMeshDataDefault;
 
-  void EnrollBndryFncts_(ApplicationInput *app_in);
+  // Optionally defined in the problem file
+  std::function<void(Mesh *, ParameterInput *)> InitUserMeshData = nullptr;
 
   // Re-used functionality in constructor
   void RegisterLoadBalancing_(ParameterInput *pin);
 
   void SetupMPIComms();
-  void PopulateLeafLocationMap();
+  void BuildTagMapAndBoundaryBuffers();
+  void CommunicateBoundaries(std::string md_name = "base");
+  void PreCommFillDerived();
+  void FillDerived();
 
-  // Transform from logical location coordinates to uniform mesh coordinates accounting
-  // for root grid
-  Real GetMeshCoordinate(CoordinateDirection dir, BlockLocation bloc,
-                         const LogicalLocation &loc) const {
-    auto xll = loc.LLCoord(dir, bloc);
-    auto root_fac = static_cast<Real>(1 << root_level) / static_cast<Real>(nrbx[dir - 1]);
-    xll *= root_fac;
-    return mesh_size.xmin(dir) * (1.0 - xll) + mesh_size.xmax(dir) * xll;
-  }
-
-  std::int64_t GetLLFromMeshCoordinate(CoordinateDirection dir, int level,
-                                       Real xmesh) const {
-    auto root_fac = static_cast<Real>(1 << root_level) / static_cast<Real>(nrbx[dir - 1]);
-    auto xLL = (xmesh - mesh_size.xmin(dir)) /
-               (mesh_size.xmax(dir) - mesh_size.xmin(dir)) / root_fac;
-    return static_cast<std::int64_t>((1 << std::max(level, 0)) * xLL);
-  }
+  void BuildBlockPartitions(GridIdentifier grid);
+  std::map<GridIdentifier, std::vector<std::shared_ptr<BlockListPartition>>>
+      block_partitions_;
 };
 
 } // namespace parthenon

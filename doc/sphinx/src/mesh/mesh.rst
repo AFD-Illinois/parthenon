@@ -50,6 +50,11 @@ member.
   time-integration advance. The default behavior calls to each package's
   (StateDesrcriptor's) ``PreStepDiagnostics`` method which, in turn,
   delegates to a ``std::function`` member that defaults to a no-op.
+- ``UserMeshWorkBeforeOutput(Mesh*, ParameterInput*, SimTime const&)``
+  is called to perform mesh-wide work immediately before writing an output
+  (the default is a no-op). The most likely use case is to fill derived
+  fields with updated values before writing them out to disk (or passing
+  them to Ascent for in-situ analysis).
 
 Multi-grid Grids Stored in ``Mesh``
 -----------------------------------
@@ -66,7 +71,10 @@ level that are neighbors to finer blocks, which implies that below the root grid
 level the blocks may not cover the entire mesh. For levels above the root grid, 
 blocks may change shape so that they only cover the domain of the root grid. Note 
 that leaf blocks may be contained in multiple blocklists, and the lists all point
-to the same block (not a separate copy). To be explicit, when ``parthenon/mesh/multigrid`` is set to ``true`` blocks corresponding to *all* internal nodes of the refinement tree are created, in addition to the leaf node blocks that are normally created.
+to the same block (not a separate copy). To be explicit, when 
+``parthenon/mesh/multigrid`` is set to ``true`` blocks corresponding to *all* 
+internal nodes of the refinement tree are created, in addition to the leaf node blocks 
+that are normally created.
 
 *GMG Implementation Note:*
 The reason for including two levels in the GMG block lists is for dealing with 
@@ -113,3 +121,20 @@ boundary communication routines with the boundary tags ``gmg_same``,
 ``gmg_restrict_send``, ``gmg_restrict_recv``, ``gmg_prolongate_send``, 
 ``gmg_prolongate_recv`` (see :ref:`boundary_comm_tasks`). 
 
+Parthenon Forest Implementation Details
+========================================
+
+Parthenon implements AMR via a forest of octrees type approach. 
+
+- A ``LogicalLocation`` is defined by the index of the octree location is contained in 
+  combined with the refinement level and location of the block within the octree. The 
+  location within the tree can be converted to a unique Morton number, and the combined 
+  Morton number and tree index can provide a unique index for the location. We use this 
+  fact to make ``LogicalLocation`` hashable so that it can be used with ``std::map`` 
+  and other hashed containers. 
+- Unlike in the Athena++ ``MeshBlockTree`` implementation that was historically used by 
+  Parthenon, the entire logical index space of each tree is within the domain of the problem. 
+  Even for some hyper-rectangular base meshes, this can result in forests that contain 
+  multiple trees. 
+
+  Some implementation notes about our forest can be found in :ref:`these notes <doc/latex/main.pdf>`. 

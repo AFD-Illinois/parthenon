@@ -1,6 +1,6 @@
 #=========================================================================================
 # Parthenon performance portable AMR framework
-# Copyright(C) 2020-2023 The Parthenon collaboration
+# Copyright(C) 2020-2024 The Parthenon collaboration
 # Licensed under the 3-clause BSD License, see LICENSE file for details
 #=========================================================================================
 # (C) (or copyright) 2020-2023. Triad National Security, LLC. All rights reserved.
@@ -20,7 +20,7 @@ cmake_minimum_required(VERSION 3.16)
 # Imports machine-specific configuration
 include(cmake/MachineCfg.cmake)
 
-project(parthenon VERSION 23.11 LANGUAGES C CXX)
+project(parthenon VERSION 24.03 LANGUAGES C CXX)
 
 if (${CMAKE_VERSION} VERSION_GREATER_EQUAL 3.19.0)
   cmake_policy(SET CMP0110 NEW)
@@ -57,14 +57,16 @@ option(CHECK_REGISTRY_PRESSURE "Check the registry pressure for Kokkos CUDA kern
 option(TEST_INTEL_OPTIMIZATION "Test intel optimization and vectorization" OFF)
 option(TEST_ERROR_CHECKING "Enables the error checking unit test. This test will FAIL" OFF)
 option(CODE_COVERAGE "Enable code coverage reporting" OFF)
+option(ENABLE_ASAN "Turn on ASAN" OFF)
+option(ENABLE_HWASAN "Turn on HWASAN (currently ARM-only)" OFF)
 
 include(cmake/Format.cmake)
 include(cmake/Lint.cmake)
 
 # regression test reference data
-set(REGRESSION_GOLD_STANDARD_VER 20 CACHE STRING "Version of gold standard to download and use")
+set(REGRESSION_GOLD_STANDARD_VER 24 CACHE STRING "Version of gold standard to download and use")
 set(REGRESSION_GOLD_STANDARD_HASH
-  "SHA512=e5e421f3c0be01e4708965542bb8b1b79b5c96de97091e46972e375c7616588d026a9a8e29226d9c7ef75346bc859fd9af72acdc7e95e0d783b5ef29aa4630b1"
+  "SHA512=e220df92a335131131e42ddb52dc221a6dbd6bb56361483b4af0292620eeb82ffb21ef3b95fd9a7c5cc158fb754da0bf1a1015bec98b5bbad05f4bceb1ee99bc"
   CACHE STRING "Hash of default gold standard file to download")
 option(REGRESSION_GOLD_STANDARD_SYNC "Automatically sync gold standard files." ON)
 
@@ -115,6 +117,9 @@ endif()
 # This is fully standard, but links a separate library when using old compilers
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(Filesystem REQUIRED COMPONENTS Experimental Final)
+
+# Require threading for tasks
+find_package(Threads)
 
 set(ENABLE_MPI OFF)
 set(NUM_MPI_PROC_TESTING "4" CACHE STRING "Number of mpi processors to use when running tests with MPI")
@@ -287,7 +292,19 @@ if (Kokkos_ENABLE_CUDA AND "${PARTHENON_ENABLE_GPU_MPI_CHECKS}" )
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CTestCustom.cmake.in ${CMAKE_BINARY_DIR}/CTestCustom.cmake @ONLY)
 endif()
 
+# option to turn on AddressSanitizer for debugging
+if(ENABLE_ASAN)
+  message(STATUS "Compiling with AddressSanitizer and UndefinedBehaviorSanitizer *enabled*")
+  add_compile_options(-fsanitize=address -fsanitize=undefined -fno-sanitize-recover=all -fsanitize=float-divide-by-zero -fsanitize=float-cast-overflow -fno-sanitize=null -fno-sanitize=alignment)
+  add_link_options(-fsanitize=address -fsanitize=undefined)
+endif(ENABLE_ASAN)
 
+# option to turn on HWAddressSanitizer for debugging
+if(ENABLE_HWASAN)
+  message(STATUS "Compiling with HWAddressSanitizer *enabled*")
+  add_compile_options(-fsanitize=hwaddress)
+  add_link_options(-fsanitize=hwaddress)
+endif(ENABLE_HWASAN)
 
 
 # Build Tests and download Catch2

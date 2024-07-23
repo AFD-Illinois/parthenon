@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -24,6 +24,7 @@
 
 #include "bvals/comms/bnd_info.hpp"
 #include "interface/sparse_pack_base.hpp"
+#include "interface/swarm_pack_base.hpp"
 #include "interface/variable_pack.hpp"
 #include "mesh/domain.hpp"
 #include "mesh/meshblock.hpp"
@@ -181,12 +182,6 @@ const MeshBlockPack<P> &PackOnMesh(M &map, BlockDataList_t<Real> &block_data_,
 
 } // namespace pack_on_mesh_impl
 
-enum class GridType { none, leaf, two_level_composite, single_level_with_internal };
-struct GridIdentifier {
-  GridType type = GridType::none;
-  int logical_level = 0;
-};
-
 /// The MeshData class is a container for cached MeshBlockPacks, i.e., it
 /// contains both the pointers to the MeshBlockData of the MeshBlocks contained
 /// in the object as well as maps to the cached MeshBlockPacks of VariablePacks or
@@ -195,10 +190,12 @@ struct GridIdentifier {
 template <typename T>
 class MeshData {
  public:
+  using parent_t = Mesh;
   MeshData() = default;
   explicit MeshData(const std::string &name) : stage_name_(name) {}
 
   GridIdentifier grid;
+  int partition;
 
   const auto &StageName() const { return stage_name_; }
 
@@ -246,17 +243,40 @@ class MeshData {
     }
   }
 
-  void Set(BlockList_t blocks, Mesh *pmesh) {
-    const int nblocks = blocks.size();
-    block_data_.resize(nblocks);
-    SetMeshPointer(pmesh);
-    for (int i = 0; i < nblocks; i++) {
-      block_data_[i] = blocks[i]->meshblock_data.Get(stage_name_);
-    }
+  template <typename ID_t>
+  void Initialize(const std::shared_ptr<BlockListPartition> &part,
+                  const std::vector<ID_t> &vars, const bool shallow) {
+    PARTHENON_REQUIRE(
+        shallow == false,
+        "Can't shallow copy when the source is not another MeshData object.");
+    SetMeshProperties(part->pmesh);
+    auto &bl = part->block_list;
+    block_data_.resize(bl.size());
+    for (int i = 0; i < bl.size(); ++i)
+      block_data_[i] = bl[i]->meshblock_data.Add(stage_name_, bl[i], vars);
+    grid = part->grid;
+    partition = part->partition;
   }
 
-  void Initialize(const MeshData<T> *src, const std::vector<std::string> &names,
-                  const bool shallow);
+  template <typename ID_t>
+  void Initialize(std::shared_ptr<MeshData<T>> src, const std::vector<ID_t> &vars,
+                  const bool shallow) {
+    if (src == nullptr) {
+      PARTHENON_THROW("src points at null");
+    }
+    SetMeshProperties(src->GetParentPointer());
+    const int nblocks = src->NumBlocks();
+    block_data_.resize(nblocks);
+    for (int i = 0; i < nblocks; ++i) {
+      auto pmbd = src->GetBlockData(i);
+      block_data_[i] = pmbd->GetBlockSharedPointer()->meshblock_data.Add(
+          stage_name_, pmbd, vars, shallow);
+    }
+    grid = src->grid;
+    partition = src->partition;
+  }
+
+  void Initialize(BlockList_t blocks, Mesh *pmesh, std::optional<int> gmg_level = {});
 
   const std::shared_ptr<MeshBlockData<T>> &GetBlockData(int n) const {
     assert(n >= 0 && n < block_data_.size());
@@ -267,6 +287,8 @@ class MeshData {
     assert(n >= 0 && n < block_data_.size());
     return block_data_[n];
   }
+
+  const auto &GetAllBlockData() const { return block_data_; }
 
   void SetAllVariablesToInitialized() {
     std::for_each(block_data_.begin(), block_data_.end(),
@@ -419,6 +441,7 @@ class MeshData {
     bvars_cache_.clear();
   }
 
+  int GetNDim() const { return ndim_; }
   int NumBlocks() const { return block_data_.size(); }
 
   bool operator==(MeshData<T> &cmp) const {
@@ -432,16 +455,46 @@ class MeshData {
     return true;
   }
 
-  bool Contains(const std::vector<std::string> &names) const {
-    for (const auto &b : block_data_) {
-      if (!b->Contains(names)) return false;
-    }
-    return true;
+  // vars may be a subset of the MeshData object
+  template <typename Vars_t>
+  bool Contains(const Vars_t &vars) const noexcept {
+    return std::all_of(block_data_.begin(), block_data_.end(),
+                       [this, vars](const auto &b) { return b->Contains(vars); });
+  }
+  // MeshData object must contain these vars and only these vars
+  template <typename Vars_t>
+  bool ContainsExactly(const Vars_t &vars) const noexcept {
+    return std::all_of(block_data_.begin(), block_data_.end(),
+                       [this, vars](const auto &b) { return b->ContainsExactly(vars); });
+  }
+
+  std::shared_ptr<SwarmContainer> GetSwarmData(int n) {
+    PARTHENON_REQUIRE(n >= 0 && n < block_data_.size(),
+                      "MeshData::GetSwarmData requires n within [0, block_data_.size()]");
+    return block_data_[n]->GetSwarmData();
   }
 
   SparsePackCache &GetSparsePackCache() { return sparse_pack_cache_; }
 
+  template <typename TYPE>
+  SwarmPackCache<TYPE> &GetSwarmPackCache() {
+    if constexpr (std::is_same<TYPE, int>::value) {
+      return swarm_pack_int_cache_;
+    } else if constexpr (std::is_same<TYPE, Real>::value) {
+      return swarm_pack_real_cache_;
+    }
+    PARTHENON_THROW("SwarmPacks only compatible with int and Real types");
+  }
+
+  void ClearSwarmCaches() {
+    if (swarm_pack_real_cache_.size() > 0) swarm_pack_real_cache_.clear();
+    if (swarm_pack_int_cache_.size() > 0) swarm_pack_int_cache_.clear();
+  }
+
  private:
+  void SetMeshProperties(Mesh *pmesh);
+
+  int ndim_;
   Mesh *pmy_mesh_;
   BlockDataList_t<T> block_data_;
   std::string stage_name_;
@@ -450,6 +503,8 @@ class MeshData {
   MapToMeshBlockVarPack<T> varPackMap_;
   MapToMeshBlockVarFluxPack<T> varFluxPackMap_;
   SparsePackCache sparse_pack_cache_;
+  SwarmPackCache<int> swarm_pack_int_cache_;
+  SwarmPackCache<Real> swarm_pack_real_cache_;
   // caches for boundary information
   BvarsCache_t bvars_cache_;
 };

@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -17,18 +17,27 @@
 namespace parthenon {
 
 template <typename T>
-void MeshData<T>::Initialize(const MeshData<T> *src,
-                             const std::vector<std::string> &names, const bool shallow) {
-  if (src == nullptr) {
-    PARTHENON_THROW("src points at null");
-  }
-  pmy_mesh_ = src->GetParentPointer();
-  const int nblocks = src->NumBlocks();
+void MeshData<T>::Initialize(BlockList_t blocks, Mesh *pmesh,
+                             std::optional<int> gmg_level) {
+  const int nblocks = blocks.size();
   block_data_.resize(nblocks);
+  SetMeshProperties(pmesh);
   for (int i = 0; i < nblocks; i++) {
-    block_data_[i] = pmy_mesh_->block_list[i]->meshblock_data.Add(
-        stage_name_, src->GetBlockData(i), names, shallow);
+    block_data_[i] = blocks[i]->meshblock_data.Add(stage_name_, blocks[i]);
   }
+  if (gmg_level) {
+    grid = GridIdentifier::two_level_composite(*gmg_level);
+  } else {
+    grid = GridIdentifier::leaf();
+  }
+}
+
+// This method is basically here to get around the forward
+// declaration of Mesh in the mesh_data.hpp
+template <typename T>
+void MeshData<T>::SetMeshProperties(Mesh *pmesh) {
+  pmy_mesh_ = pmesh;
+  ndim_ = pmesh == nullptr ? 0 : pmesh->ndim;
 }
 
 template class MeshData<Real>;

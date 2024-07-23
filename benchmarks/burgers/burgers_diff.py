@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # ========================================================================================
-# (C) (or copyright) 2023. Triad National Security, LLC. All rights reserved.
+# (C) (or copyright) 2024. Triad National Security, LLC. All rights reserved.
 #
 # This program was produced under U.S. Government contract 89233218CNA000001 for Los
 # Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -12,6 +12,7 @@
 # the public, perform publicly and display publicly, and to permit others to do so.
 # ========================================================================================
 
+import sys
 import numpy as np
 from argparse import ArgumentParser
 
@@ -20,7 +21,7 @@ parser = ArgumentParser(
     description="Compute difference between two history solvers parthenon VIBE",
 )
 parser.add_argument("file1", type=str, help="First file in diff")
-parser.add_argument("file2", type=str, help="Second fiel in diff")
+parser.add_argument("file2", type=str, help="Second file in diff")
 parser.add_argument(
     "-t", "--tolerance", type=float, default=1e-8, help="Relative tolerance for diff"
 )
@@ -53,4 +54,4 @@ def compare_files(file1, file2, tolerance, print_results=True):
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    compare_files(args.file1, args.file1, args.tolerance, True)
+    sys.exit(compare_files(args.file1, args.file2, args.tolerance, True))

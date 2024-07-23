@@ -3,7 +3,7 @@
 // Copyright(C) 2014 James M. Stone <jmstone@princeton.edu> and other code contributors
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2020-2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -46,8 +46,8 @@
 #include "mesh/mesh.hpp"
 #include "mesh/mesh_refinement.hpp"
 #include "mesh/meshblock.hpp"
-#include "mesh/meshblock_tree.hpp"
 #include "outputs/restart.hpp"
+#include "outputs/restart_hdf5.hpp"
 #include "parameter_input.hpp"
 #include "parthenon_arrays.hpp"
 #include "prolong_restrict/prolong_restrict.hpp"
@@ -56,37 +56,10 @@
 #include "utils/partition_stl_containers.hpp"
 
 namespace parthenon {
-
-//----------------------------------------------------------------------------------------
-// Mesh constructor, builds mesh at start of calculation using parameters in input file
-
 Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
-           int mesh_test)
+           base_constructor_selector_t)
     : // public members:
       modified(true), is_restart(false),
-      // aggregate initialization of RegionSize struct:
-      mesh_size({pin->GetReal("parthenon/mesh", "x1min"),
-                 pin->GetReal("parthenon/mesh", "x2min"),
-                 pin->GetReal("parthenon/mesh", "x3min")},
-                {pin->GetReal("parthenon/mesh", "x1max"),
-                 pin->GetReal("parthenon/mesh", "x2max"),
-                 pin->GetReal("parthenon/mesh", "x3max")},
-                {pin->GetOrAddReal("parthenon/mesh", "x1rat", 1.0),
-                 pin->GetOrAddReal("parthenon/mesh", "x2rat", 1.0),
-                 pin->GetOrAddReal("parthenon/mesh", "x3rat", 1.0)},
-                {pin->GetInteger("parthenon/mesh", "nx1"),
-                 pin->GetInteger("parthenon/mesh", "nx2"),
-                 pin->GetInteger("parthenon/mesh", "nx3")},
-                {false, pin->GetInteger("parthenon/mesh", "nx2") == 1,
-                 pin->GetInteger("parthenon/mesh", "nx3") == 1}),
-      mesh_bcs{
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix1_bc", "reflecting")),
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox1_bc", "reflecting")),
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix2_bc", "reflecting")),
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox2_bc", "reflecting")),
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix3_bc", "reflecting")),
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox3_bc", "reflecting"))},
-      ndim((mesh_size.nx(X3DIR) > 1) ? 3 : ((mesh_size.nx(X2DIR) > 1) ? 2 : 1)),
       adaptive(pin->GetOrAddString("parthenon/mesh", "refinement", "none") == "adaptive"
                    ? true
                    : false),
@@ -100,55 +73,15 @@ Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
                     ? true
                     : false),
       nbnew(), nbdel(), step_since_lb(), gflag(), packages(packages),
+      resolved_packages(ResolvePackages(packages)),
+      default_pack_size_(pin->GetOrAddInteger("parthenon/mesh", "pack_size", -1)),
       // private members:
       num_mesh_threads_(pin->GetOrAddInteger("parthenon/mesh", "num_threads", 1)),
-      tree(this), use_uniform_meshgen_fn_{true, true, true, true}, lb_flag_(true),
-      lb_automatic_(),
-      lb_manual_(), MeshBndryFnctn{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr} {
-  std::stringstream msg;
-  RegionSize block_size;
-  BoundaryFlag block_bcs[6];
-  std::int64_t nbmax;
-
-  // mesh test
-  if (mesh_test > 0) Globals::nranks = mesh_test;
-
-  // check number of OpenMP threads for mesh
-  if (num_mesh_threads_ < 1) {
-    msg << "### FATAL ERROR in Mesh constructor" << std::endl
-        << "Number of OpenMP threads must be >= 1, but num_threads=" << num_mesh_threads_
-        << std::endl;
-    PARTHENON_FAIL(msg);
-  }
-
-  for (auto &[dir, label] : std::vector<std::pair<CoordinateDirection, std::string>>{
-           {X1DIR, "1"}, {X2DIR, "2"}, {X3DIR, "3"}}) {
-    // check number of grid cells in root level of mesh from input file.
-    if (mesh_size.nx(dir) < 1) {
-      msg << "### FATAL ERROR in Mesh constructor" << std::endl
-          << "In mesh block in input file nx" + label + " must be >= 1, but nx" + label +
-                 "="
-          << mesh_size.nx(dir) << std::endl;
-      PARTHENON_FAIL(msg);
-    }
-    // check physical size of mesh (root level) from input file.
-    if (mesh_size.xmax(dir) <= mesh_size.xmin(dir)) {
-      msg << "### FATAL ERROR in Mesh constructor" << std::endl
-          << "Input x" + label + "max must be larger than x" + label + "min: x" + label +
-                 "min="
-          << mesh_size.xmin(dir) << " x" + label + "max=" << mesh_size.xmax(dir)
-          << std::endl;
-      PARTHENON_FAIL(msg);
-    }
-  }
-
-  if (mesh_size.nx(X2DIR) == 1 && mesh_size.nx(X3DIR) > 1) {
-    msg << "### FATAL ERROR in Mesh constructor" << std::endl
-        << "In mesh block in input file: nx2=1, nx3=" << mesh_size.nx(X3DIR)
-        << ", 2D problems in x1-x3 plane not supported" << std::endl;
-    PARTHENON_FAIL(msg);
-  }
-
+      use_uniform_meshgen_fn_{true, true, true, true}, lb_flag_(true), lb_automatic_(),
+      lb_manual_(), nslist(Globals::nranks), nblist(Globals::nranks),
+      nref(Globals::nranks), nderef(Globals::nranks), rdisp(Globals::nranks),
+      ddisp(Globals::nranks), bnref(Globals::nranks), bnderef(Globals::nranks),
+      brdisp(Globals::nranks), bddisp(Globals::nranks) {
   // Allow for user overrides to default Parthenon functions
   if (app_in->InitUserMeshData != nullptr) {
     InitUserMeshData = app_in->InitUserMeshData;
@@ -156,11 +89,20 @@ Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
   if (app_in->MeshProblemGenerator != nullptr) {
     ProblemGenerator = app_in->MeshProblemGenerator;
   }
+  if (app_in->MeshPostInitialization != nullptr) {
+    PostInitialization = app_in->MeshPostInitialization;
+  }
   if (app_in->PreStepMeshUserWorkInLoop != nullptr) {
     PreStepUserWorkInLoop = app_in->PreStepMeshUserWorkInLoop;
   }
   if (app_in->PostStepMeshUserWorkInLoop != nullptr) {
     PostStepUserWorkInLoop = app_in->PostStepMeshUserWorkInLoop;
+  }
+  if (app_in->UserMeshWorkBeforeOutput != nullptr) {
+    UserMeshWorkBeforeOutput = app_in->UserMeshWorkBeforeOutput;
+  }
+  if (app_in->UserWorkBeforeRestartOutput != nullptr) {
+    UserWorkBeforeRestartOutput = app_in->UserWorkBeforeRestartOutput;
   }
   if (app_in->PreStepDiagnosticsInLoop != nullptr) {
     PreStepUserDiagnosticsInLoop = app_in->PreStepDiagnosticsInLoop;
@@ -172,190 +114,214 @@ Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
     UserWorkAfterLoop = app_in->UserWorkAfterLoop;
   }
 
-  // check the consistency of the periodic boundaries
-  if (((mesh_bcs[BoundaryFace::inner_x1] == BoundaryFlag::periodic &&
-        mesh_bcs[BoundaryFace::outer_x1] != BoundaryFlag::periodic) ||
-       (mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic &&
-        mesh_bcs[BoundaryFace::outer_x1] == BoundaryFlag::periodic)) ||
-      (mesh_size.nx(X2DIR) > 1 &&
-       ((mesh_bcs[BoundaryFace::inner_x2] == BoundaryFlag::periodic &&
-         mesh_bcs[BoundaryFace::outer_x2] != BoundaryFlag::periodic) ||
-        (mesh_bcs[BoundaryFace::inner_x2] != BoundaryFlag::periodic &&
-         mesh_bcs[BoundaryFace::outer_x2] == BoundaryFlag::periodic))) ||
-      (mesh_size.nx(X3DIR) > 1 &&
-       ((mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::periodic &&
-         mesh_bcs[BoundaryFace::outer_x3] != BoundaryFlag::periodic) ||
-        (mesh_bcs[BoundaryFace::inner_x3] != BoundaryFlag::periodic &&
-         mesh_bcs[BoundaryFace::outer_x3] == BoundaryFlag::periodic)))) {
-    msg << "### FATAL ERROR in Mesh constructor" << std::endl
-        << "When periodic boundaries are in use, both sides must be periodic."
-        << std::endl;
-    PARTHENON_FAIL(msg);
-  }
-
-  EnrollBndryFncts_(app_in);
-  for (auto &[dir, label] : std::vector<std::tuple<CoordinateDirection, std::string>>{
-           {X1DIR, "nx1"}, {X2DIR, "nx2"}, {X3DIR, "nx3"}}) {
-    block_size.xrat(dir) = mesh_size.xrat(dir);
-    block_size.symmetry(dir) = mesh_size.symmetry(dir);
-    if (!block_size.symmetry(dir)) {
-      block_size.nx(dir) =
-          pin->GetOrAddInteger("parthenon/meshblock", label, mesh_size.nx(dir));
-    } else {
-      block_size.nx(dir) = mesh_size.nx(dir);
-    }
-    nrbx[dir - 1] = mesh_size.nx(dir) / block_size.nx(dir);
-  }
-  nbmax = *std::max_element(std::begin(nrbx), std::end(nrbx));
-  base_block_size = block_size;
-
-  // check consistency of the block and mesh
-  if (mesh_size.nx(X1DIR) % block_size.nx(X1DIR) != 0 ||
-      mesh_size.nx(X2DIR) % block_size.nx(X2DIR) != 0 ||
-      mesh_size.nx(X3DIR) % block_size.nx(X3DIR) != 0) {
-    msg << "### FATAL ERROR in Mesh constructor" << std::endl
-        << "the Mesh must be evenly divisible by the MeshBlock" << std::endl;
-    PARTHENON_FAIL(msg);
-  }
-  if (block_size.nx(X1DIR) < 4 || (block_size.nx(X2DIR) < 4 && (ndim >= 2)) ||
-      (block_size.nx(X3DIR) < 4 && (ndim >= 3))) {
-    msg << "### FATAL ERROR in Mesh constructor" << std::endl
-        << "block_size must be larger than or equal to 4 cells." << std::endl;
-    PARTHENON_FAIL(msg);
-  }
-
-  // initialize user-enrollable functions
-  default_pack_size_ = pin->GetOrAddInteger("parthenon/mesh", "pack_size", -1);
-
-  // calculate the logical root level and maximum level
-  for (root_level = 0; (1 << root_level) < nbmax; root_level++) {
-  }
-  current_level = root_level;
-
-  tree.CreateRootGrid();
-
-  // Load balancing flag and parameters
-  RegisterLoadBalancing_(pin);
-
+  // Default root level, may be overwritten by another constructor
+  root_level = 0;
   // SMR / AMR:
   if (adaptive) {
     max_level = pin->GetOrAddInteger("parthenon/mesh", "numlevel", 1) + root_level - 1;
-    if (max_level > 63) {
-      msg << "### FATAL ERROR in Mesh constructor" << std::endl
-          << "The number of the refinement level must be smaller than "
-          << 63 - root_level + 1 << "." << std::endl;
-      PARTHENON_FAIL(msg);
-    }
   } else {
     max_level = 63;
   }
 
-  InitUserMeshData(this, pin);
+  SetupMPIComms();
 
-  if (multilevel) {
-    if (block_size.nx(X1DIR) % 2 == 1 || (block_size.nx(X2DIR) % 2 == 1 && (ndim >= 2)) ||
-        (block_size.nx(X3DIR) % 2 == 1 && (ndim >= 3))) {
-      msg << "### FATAL ERROR in Mesh constructor" << std::endl
-          << "The size of MeshBlock must be divisible by 2 in order to use SMR or AMR."
-          << std::endl;
-      PARTHENON_FAIL(msg);
-    }
+  RegisterLoadBalancing_(pin);
 
-    InputBlock *pib = pin->pfirst_block;
-    while (pib != nullptr) {
-      if (pib->block_name.compare(0, 27, "parthenon/static_refinement") == 0) {
-        RegionSize ref_size;
-        ref_size.xmin(X1DIR) = pin->GetReal(pib->block_name, "x1min");
-        ref_size.xmax(X1DIR) = pin->GetReal(pib->block_name, "x1max");
-        if (ndim >= 2) {
-          ref_size.xmin(X2DIR) = pin->GetReal(pib->block_name, "x2min");
-          ref_size.xmax(X2DIR) = pin->GetReal(pib->block_name, "x2max");
-        } else {
-          ref_size.xmin(X2DIR) = mesh_size.xmin(X2DIR);
-          ref_size.xmax(X2DIR) = mesh_size.xmax(X2DIR);
-        }
-        if (ndim == 3) {
-          ref_size.xmin(X3DIR) = pin->GetReal(pib->block_name, "x3min");
-          ref_size.xmax(X3DIR) = pin->GetReal(pib->block_name, "x3max");
-        } else {
-          ref_size.xmin(X3DIR) = mesh_size.xmin(X3DIR);
-          ref_size.xmax(X3DIR) = mesh_size.xmax(X3DIR);
-        }
-        int ref_lev = pin->GetInteger(pib->block_name, "level");
-        int lrlev = ref_lev + root_level;
-        if (lrlev > current_level) current_level = lrlev;
-        // range check
-        if (ref_lev < 1) {
-          msg << "### FATAL ERROR in Mesh constructor" << std::endl
-              << "Refinement level must be larger than 0 (root level = 0)" << std::endl;
-          PARTHENON_FAIL(msg);
-        }
-        if (lrlev > max_level) {
-          msg << "### FATAL ERROR in Mesh constructor" << std::endl
-              << "Refinement level exceeds the maximum level (specify "
-              << "'maxlevel' parameter in <parthenon/mesh> input block if adaptive)."
-              << std::endl;
+  mesh_data.SetMeshPointer(this);
 
-          PARTHENON_FAIL(msg);
-        }
-        if (ref_size.xmin(X1DIR) > ref_size.xmax(X1DIR) ||
-            ref_size.xmin(X2DIR) > ref_size.xmax(X2DIR) ||
-            ref_size.xmin(X3DIR) > ref_size.xmax(X3DIR)) {
-          msg << "### FATAL ERROR in Mesh constructor" << std::endl
-              << "Invalid refinement region is specified." << std::endl;
-          PARTHENON_FAIL(msg);
-        }
-        if (ref_size.xmin(X1DIR) < mesh_size.xmin(X1DIR) ||
-            ref_size.xmax(X1DIR) > mesh_size.xmax(X1DIR) ||
-            ref_size.xmin(X2DIR) < mesh_size.xmin(X2DIR) ||
-            ref_size.xmax(X2DIR) > mesh_size.xmax(X2DIR) ||
-            ref_size.xmin(X3DIR) < mesh_size.xmin(X3DIR) ||
-            ref_size.xmax(X3DIR) > mesh_size.xmax(X3DIR)) {
-          msg << "### FATAL ERROR in Mesh constructor" << std::endl
-              << "Refinement region must be smaller than the whole mesh." << std::endl;
-          PARTHENON_FAIL(msg);
-        }
-        std::int64_t l_region_min[3]{0, 0, 0};
-        std::int64_t l_region_max[3]{1, 1, 1};
-        for (auto dir : {X1DIR, X2DIR, X3DIR}) {
-          if (!mesh_size.symmetry(dir)) {
-            l_region_min[dir - 1] =
-                GetLLFromMeshCoordinate(dir, lrlev, ref_size.xmin(dir));
-            l_region_max[dir - 1] =
-                GetLLFromMeshCoordinate(dir, lrlev, ref_size.xmax(dir));
-            l_region_min[dir - 1] =
-                std::max(l_region_min[dir - 1], static_cast<std::int64_t>(0));
-            l_region_max[dir - 1] =
-                std::min(l_region_max[dir - 1],
-                         static_cast<std::int64_t>(nrbx[dir - 1] * (1LL << ref_lev) - 1));
-            auto current_loc =
-                LogicalLocation(lrlev, l_region_max[0], l_region_max[1], l_region_max[2]);
-            // Remove last block if it just it's boundary overlaps with the region
-            if (GetMeshCoordinate(dir, BlockLocation::Left, current_loc) ==
-                ref_size.xmax(dir))
-              l_region_max[dir - 1]--;
-            if (l_region_min[dir - 1] % 2 == 1) l_region_min[dir - 1]--;
-            if (l_region_max[dir - 1] % 2 == 0) l_region_max[dir - 1]++;
-          }
-        }
-        for (std::int64_t k = l_region_min[2]; k < l_region_max[2]; k += 2) {
-          for (std::int64_t j = l_region_min[1]; j < l_region_max[1]; j += 2) {
-            for (std::int64_t i = l_region_min[0]; i < l_region_max[0]; i += 2) {
-              LogicalLocation nloc(lrlev, i, j, k);
-              int nnew;
-              tree.AddMeshBlock(nloc, nnew);
-            }
-          }
-        }
-      }
-      pib = pib->pnext;
+  if (InitUserMeshData) InitUserMeshData(this, pin);
+}
+
+Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
+           hyper_rectangular_constructor_selector_t)
+    : Mesh(pin, app_in, packages, base_constructor_selector_t()) {
+  mesh_size = RegionSize(
+      {pin->GetReal("parthenon/mesh", "x1min"), pin->GetReal("parthenon/mesh", "x2min"),
+       pin->GetReal("parthenon/mesh", "x3min")},
+      {pin->GetReal("parthenon/mesh", "x1max"), pin->GetReal("parthenon/mesh", "x2max"),
+       pin->GetReal("parthenon/mesh", "x3max")},
+      {pin->GetOrAddReal("parthenon/mesh", "x1rat", 1.0),
+       pin->GetOrAddReal("parthenon/mesh", "x2rat", 1.0),
+       pin->GetOrAddReal("parthenon/mesh", "x3rat", 1.0)},
+      {pin->GetInteger("parthenon/mesh", "nx1"), pin->GetInteger("parthenon/mesh", "nx2"),
+       pin->GetInteger("parthenon/mesh", "nx3")},
+      {false, pin->GetInteger("parthenon/mesh", "nx2") == 1,
+       pin->GetInteger("parthenon/mesh", "nx3") == 1});
+  mesh_bcs = {
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix1_bc", "reflecting")),
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox1_bc", "reflecting")),
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix2_bc", "reflecting")),
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox2_bc", "reflecting")),
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix3_bc", "reflecting")),
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox3_bc", "reflecting"))};
+  ndim = (mesh_size.nx(X3DIR) > 1) ? 3 : ((mesh_size.nx(X2DIR) > 1) ? 2 : 1);
+
+  for (auto &[dir, label] : std::vector<std::tuple<CoordinateDirection, std::string>>{
+           {X1DIR, "nx1"}, {X2DIR, "nx2"}, {X3DIR, "nx3"}}) {
+    base_block_size.xrat(dir) = mesh_size.xrat(dir);
+    base_block_size.symmetry(dir) = mesh_size.symmetry(dir);
+    if (!base_block_size.symmetry(dir)) {
+      base_block_size.nx(dir) =
+          pin->GetOrAddInteger("parthenon/meshblock", label, mesh_size.nx(dir));
+    } else {
+      base_block_size.nx(dir) = mesh_size.nx(dir);
     }
   }
 
+  // Load balancing flag and parameters
+  forest = forest::Forest::HyperRectangular(mesh_size, base_block_size, mesh_bcs);
+  root_level = forest.root_level;
+  forest.EnrollBndryFncts(app_in, resolved_packages->UserBoundaryFunctions,
+                          resolved_packages->UserSwarmBoundaryFunctions);
+
+  // SMR / AMR:
+  if (adaptive) {
+    max_level = pin->GetOrAddInteger("parthenon/mesh", "numlevel", 1) + root_level - 1;
+  } else {
+    max_level = 63;
+  }
+
+  // Register user defined boundary conditions
+
+  CheckMeshValidity();
+}
+
+Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
+           forest::ForestDefinition &forest_def)
+    : Mesh(pin, app_in, packages, base_constructor_selector_t()) {
+  mesh_size =
+      RegionSize({0, 0, 0}, {1, 1, 0}, {1, 1, 1}, {1, 1, 1}, {false, false, true});
+  mesh_bcs = {
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix1_bc", "reflecting")),
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox1_bc", "reflecting")),
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix2_bc", "reflecting")),
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox2_bc", "reflecting")),
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix3_bc", "reflecting")),
+      GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox3_bc", "reflecting"))};
+  for (auto &[dir, label] : std::vector<std::tuple<CoordinateDirection, std::string>>{
+           {X1DIR, "nx1"}, {X2DIR, "nx2"}, {X3DIR, "nx3"}}) {
+    base_block_size.xrat(dir) = mesh_size.xrat(dir);
+    base_block_size.symmetry(dir) = mesh_size.symmetry(dir);
+    if (!base_block_size.symmetry(dir)) {
+      base_block_size.nx(dir) =
+          pin->GetOrAddInteger("parthenon/meshblock", label, mesh_size.nx(dir));
+    } else {
+      base_block_size.nx(dir) = mesh_size.nx(dir);
+    }
+  }
+  forest_def.SetBlockSize(base_block_size);
+
+  ndim = 2;
+  // Load balancing flag and parameters
+  forest = forest::Forest::Make2D(forest_def);
+  root_level = forest.root_level;
+  forest.EnrollBndryFncts(app_in, resolved_packages->UserBoundaryFunctions,
+                          resolved_packages->UserSwarmBoundaryFunctions);
+  BuildBlockList(pin, app_in, packages, 0);
+}
+
+//----------------------------------------------------------------------------------------
+// Mesh constructor, builds mesh at start of calculation using parameters in input file
+Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
+           int mesh_test)
+    : Mesh(pin, app_in, packages, hyper_rectangular_constructor_selector_t()) {
+  // mesh test
+  if (mesh_test > 0) Globals::nranks = mesh_test;
+
+  if (multilevel) DoStaticRefinement(pin);
+
   // initial mesh hierarchy construction is completed here
-  tree.CountMeshBlock(nbtotal);
-  loclist.resize(nbtotal);
-  tree.GetMeshBlockList(loclist.data(), nullptr, nbtotal);
+  BuildBlockList(pin, app_in, packages, mesh_test);
+}
+
+//----------------------------------------------------------------------------------------
+// Mesh constructor for restarts. Load the restart file
+Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, RestartReader &rr,
+           Packages_t &packages, int mesh_test)
+    : Mesh(pin, app_in, packages, hyper_rectangular_constructor_selector_t()) {
+  is_restart = true;
+  std::stringstream msg;
+
+  // mesh test
+  if (mesh_test > 0) Globals::nranks = mesh_test;
+
+  // read the restart file
+  // the file is already open and the pointer is set to after <par_end>
+
+  auto mesh_info = rr.GetMeshInfo();
+  // All ranks read HDF file
+  nbnew = mesh_info.nbnew;
+  nbdel = mesh_info.nbdel;
+  nbtotal = mesh_info.nbtotal;
+
+  const auto grid_dim = mesh_info.grid_dim;
+  PARTHENON_REQUIRE(mesh_size.xmin(X1DIR) == grid_dim[0],
+                    "Mesh size shouldn't change on restart.");
+  PARTHENON_REQUIRE(mesh_size.xmax(X1DIR) == grid_dim[1],
+                    "Mesh size shouldn't change on restart.");
+  PARTHENON_REQUIRE(mesh_size.xrat(X1DIR) == grid_dim[2],
+                    "Mesh size shouldn't change on restart.");
+
+  PARTHENON_REQUIRE(mesh_size.xmin(X2DIR) == grid_dim[3],
+                    "Mesh size shouldn't change on restart.");
+  PARTHENON_REQUIRE(mesh_size.xmax(X2DIR) == grid_dim[4],
+                    "Mesh size shouldn't change on restart.");
+  PARTHENON_REQUIRE(mesh_size.xrat(X2DIR) == grid_dim[5],
+                    "Mesh size shouldn't change on restart.");
+
+  PARTHENON_REQUIRE(mesh_size.xmin(X3DIR) == grid_dim[6],
+                    "Mesh size shouldn't change on restart.");
+  PARTHENON_REQUIRE(mesh_size.xmax(X3DIR) == grid_dim[7],
+                    "Mesh size shouldn't change on restart.");
+  PARTHENON_REQUIRE(mesh_size.xrat(X3DIR) == grid_dim[8],
+                    "Mesh size shouldn't change on restart.");
+
+  for (auto &dir : {X1DIR, X2DIR, X3DIR}) {
+    PARTHENON_REQUIRE(base_block_size.nx(dir) == mesh_info.block_size[dir - 1] -
+                                                     (mesh_info.block_size[dir - 1] > 1) *
+                                                         mesh_info.includes_ghost * 2 *
+                                                         mesh_info.n_ghost,
+                      "Block size not consistent on restart.");
+  }
+
+  // Populate logical locations
+  loclist = std::vector<LogicalLocation>(nbtotal);
+  std::unordered_map<LogicalLocation, int> dealloc_count;
+  auto lx123 = mesh_info.lx123;
+  auto locLevelGidLidCnghostGflag = mesh_info.level_gid_lid_cnghost_gflag;
+  for (int i = 0; i < nbtotal; i++) {
+    loclist[i] = forest.GetForestLocationFromLegacyTreeLocation(
+        LogicalLocation(locLevelGidLidCnghostGflag[NumIDsAndFlags * i], lx123[3 * i],
+                        lx123[3 * i + 1], lx123[3 * i + 2]));
+    dealloc_count[loclist[i]] = mesh_info.derefinement_count[i];
+  }
+
+  // rebuild the Block Tree
+  for (int i = 0; i < nbtotal; i++)
+    forest.AddMeshBlock(loclist[i], false);
+
+  int nnb = forest.CountMeshBlock();
+  if (nnb != nbtotal) {
+    msg << "### FATAL ERROR in Mesh constructor" << std::endl
+        << "Tree reconstruction failed. The total numbers of the blocks do not match. ("
+        << nbtotal << " != " << nnb << ")" << std::endl;
+    PARTHENON_FAIL(msg);
+  }
+
+  BuildBlockList(pin, app_in, packages, mesh_test, dealloc_count);
+}
+
+void Mesh::BuildBlockList(ParameterInput *pin, ApplicationInput *app_in,
+                          Packages_t &packages, int mesh_test,
+                          const std::unordered_map<LogicalLocation, int> &dealloc_count) {
+  // LFR: This routine should work for general block lists
+  std::stringstream msg;
+
+  loclist = forest.GetMeshBlockListAndResolveGids();
+  nbtotal = loclist.size();
+  current_level = -1;
+  for (const auto &loc : loclist)
+    if (loc.level() > current_level) current_level = loc.level();
 
 #ifdef MPI_PARALLEL
   // check if there are sufficient blocks
@@ -375,42 +341,17 @@ Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
 
   ranklist = std::vector<int>(nbtotal);
 
-  nslist = std::vector<int>(Globals::nranks);
-  nblist = std::vector<int>(Globals::nranks);
-  if (adaptive) { // allocate arrays for AMR
-    nref = std::vector<int>(Globals::nranks);
-    nderef = std::vector<int>(Globals::nranks);
-    rdisp = std::vector<int>(Globals::nranks);
-    ddisp = std::vector<int>(Globals::nranks);
-    bnref = std::vector<int>(Globals::nranks);
-    bnderef = std::vector<int>(Globals::nranks);
-    brdisp = std::vector<int>(Globals::nranks);
-    bddisp = std::vector<int>(Globals::nranks);
-  }
-
   // initialize cost array with the simplest estimate; all the blocks are equal
   costlist = std::vector<double>(nbtotal, 1.0);
 
   CalculateLoadBalance(costlist, ranklist, nslist, nblist);
-  PopulateLeafLocationMap();
-
-  // Output some diagnostic information to terminal
 
   // Output MeshBlock list and quit (mesh test only); do not create meshes
   if (mesh_test > 0) {
+    BuildBlockPartitions(GridIdentifier::leaf());
     if (Globals::my_rank == 0) OutputMeshStructure(ndim);
     return;
   }
-
-  mesh_data.SetMeshPointer(this);
-
-  resolved_packages = ResolvePackages(packages);
-
-  // Register user defined boundary conditions
-  UserBoundaryFunctions = resolved_packages->UserBoundaryFunctions;
-
-  // Setup unique comms for each variable and swarm
-  SetupMPIComms();
 
   // create MeshBlock list for this process
   int nbs = nslist[Globals::my_rank];
@@ -419,277 +360,21 @@ Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, Packages_t &packages,
   block_list.clear();
   block_list.resize(nbe - nbs + 1);
   for (int i = nbs; i <= nbe; i++) {
+    RegionSize block_size;
+    BoundaryFlag block_bcs[6];
     SetBlockSizeAndBoundaries(loclist[i], block_size, block_bcs);
-    // create a block and add into the link list
-    block_list[i - nbs] =
-        MeshBlock::Make(i, i - nbs, loclist[i], block_size, block_bcs, this, pin, app_in,
-                        packages, resolved_packages, gflag);
-    block_list[i - nbs]->SearchAndSetNeighbors(this, tree, ranklist.data(),
-                                               nslist.data());
-  }
-  SetSameLevelNeighbors(block_list, leaf_grid_locs, this->GetRootGridInfo(), nbs, false);
-  BuildGMGHierarchy(nbs, pin, app_in);
-  ResetLoadBalanceVariables();
-}
-
-//----------------------------------------------------------------------------------------
-// Mesh constructor for restarts. Load the restart file
-Mesh::Mesh(ParameterInput *pin, ApplicationInput *app_in, RestartReader &rr,
-           Packages_t &packages, int mesh_test)
-    : // public members:
-      // aggregate initialization of RegionSize struct:
-      // (will be overwritten by memcpy from restart file, in this case)
-      modified(true), is_restart(true),
-      // aggregate initialization of RegionSize struct:
-      mesh_size({pin->GetReal("parthenon/mesh", "x1min"),
-                 pin->GetReal("parthenon/mesh", "x2min"),
-                 pin->GetReal("parthenon/mesh", "x3min")},
-                {pin->GetReal("parthenon/mesh", "x1max"),
-                 pin->GetReal("parthenon/mesh", "x2max"),
-                 pin->GetReal("parthenon/mesh", "x3max")},
-                {pin->GetOrAddReal("parthenon/mesh", "x1rat", 1.0),
-                 pin->GetOrAddReal("parthenon/mesh", "x2rat", 1.0),
-                 pin->GetOrAddReal("parthenon/mesh", "x3rat", 1.0)},
-                {pin->GetInteger("parthenon/mesh", "nx1"),
-                 pin->GetInteger("parthenon/mesh", "nx2"),
-                 pin->GetInteger("parthenon/mesh", "nx3")},
-                {false, pin->GetInteger("parthenon/mesh", "nx2") == 1,
-                 pin->GetInteger("parthenon/mesh", "nx3") == 1}),
-      mesh_bcs{
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix1_bc", "reflecting")),
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox1_bc", "reflecting")),
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix2_bc", "reflecting")),
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox2_bc", "reflecting")),
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ix3_bc", "reflecting")),
-          GetBoundaryFlag(pin->GetOrAddString("parthenon/mesh", "ox3_bc", "reflecting"))},
-      ndim((mesh_size.nx(X3DIR) > 1) ? 3 : ((mesh_size.nx(X2DIR) > 1) ? 2 : 1)),
-      adaptive(pin->GetOrAddString("parthenon/mesh", "refinement", "none") == "adaptive"
-                   ? true
-                   : false),
-      multilevel(
-          (adaptive ||
-           pin->GetOrAddString("parthenon/mesh", "refinement", "none") == "static" ||
-           pin->GetOrAddString("parthenon/mesh", "multigrid", "false") == "true")
-              ? true
-              : false),
-      multigrid(pin->GetOrAddString("parthenon/mesh", "multigrid", "false") == "true"
-                    ? true
-                    : false),
-      nbnew(), nbdel(), step_since_lb(), gflag(), packages(packages),
-      // private members:
-      num_mesh_threads_(pin->GetOrAddInteger("parthenon/mesh", "num_threads", 1)),
-      tree(this), use_uniform_meshgen_fn_{true, true, true, true}, lb_flag_(true),
-      lb_automatic_(),
-      lb_manual_(), MeshBndryFnctn{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr} {
-  std::stringstream msg;
-  RegionSize block_size;
-  BoundaryFlag block_bcs[6];
-
-  // mesh test
-  if (mesh_test > 0) Globals::nranks = mesh_test;
-
-  // check the number of OpenMP threads for mesh
-  if (num_mesh_threads_ < 1) {
-    msg << "### FATAL ERROR in Mesh constructor" << std::endl
-        << "Number of OpenMP threads must be >= 1, but num_threads=" << num_mesh_threads_
-        << std::endl;
-    PARTHENON_FAIL(msg);
-  }
-
-  // read the restart file
-  // the file is already open and the pointer is set to after <par_end>
-
-  // All ranks read HDF file
-  nbnew = rr.GetAttr<int>("Info", "NBNew");
-  nbdel = rr.GetAttr<int>("Info", "NBDel");
-  nbtotal = rr.GetAttr<int>("Info", "NumMeshBlocks");
-  root_level = rr.GetAttr<int>("Info", "RootLevel");
-
-  const auto bc = rr.GetAttrVec<std::string>("Info", "BoundaryConditions");
-  for (int i = 0; i < 6; i++) {
-    block_bcs[i] = GetBoundaryFlag(bc[i]);
-  }
-
-  // Allow for user overrides to default Parthenon functions
-  if (app_in->InitUserMeshData != nullptr) {
-    InitUserMeshData = app_in->InitUserMeshData;
-  }
-  if (app_in->PreStepMeshUserWorkInLoop != nullptr) {
-    PreStepUserWorkInLoop = app_in->PreStepMeshUserWorkInLoop;
-  }
-  if (app_in->PostStepMeshUserWorkInLoop != nullptr) {
-    PostStepUserWorkInLoop = app_in->PostStepMeshUserWorkInLoop;
-  }
-  if (app_in->PreStepDiagnosticsInLoop != nullptr) {
-    PreStepUserDiagnosticsInLoop = app_in->PreStepDiagnosticsInLoop;
-  }
-  if (app_in->PostStepDiagnosticsInLoop != nullptr) {
-    PostStepUserDiagnosticsInLoop = app_in->PostStepDiagnosticsInLoop;
-  }
-  if (app_in->UserWorkAfterLoop != nullptr) {
-    UserWorkAfterLoop = app_in->UserWorkAfterLoop;
-  }
-  EnrollBndryFncts_(app_in);
-
-  const auto grid_dim = rr.GetAttrVec<Real>("Info", "RootGridDomain");
-  mesh_size.xmin(X1DIR) = grid_dim[0];
-  mesh_size.xmax(X1DIR) = grid_dim[1];
-  mesh_size.xrat(X1DIR) = grid_dim[2];
-
-  mesh_size.xmin(X2DIR) = grid_dim[3];
-  mesh_size.xmax(X2DIR) = grid_dim[4];
-  mesh_size.xrat(X2DIR) = grid_dim[5];
-
-  mesh_size.xmin(X3DIR) = grid_dim[6];
-  mesh_size.xmax(X3DIR) = grid_dim[7];
-  mesh_size.xrat(X3DIR) = grid_dim[8];
-
-  // initialize
-  loclist = std::vector<LogicalLocation>(nbtotal);
-
-  const auto blockSize = rr.GetAttrVec<int>("Info", "MeshBlockSize");
-  const auto includesGhost = rr.GetAttr<int>("Info", "IncludesGhost");
-  const auto nGhost = rr.GetAttr<int>("Info", "NGhost");
-
-  for (auto &dir : {X1DIR, X2DIR, X3DIR}) {
-    block_size.xrat(dir) = mesh_size.xrat(dir);
-    block_size.nx(dir) =
-        blockSize[dir - 1] - (blockSize[dir - 1] > 1) * includesGhost * 2 * nGhost;
-    if (block_size.nx(dir) == 1) {
-      block_size.symmetry(dir) = true;
-      mesh_size.symmetry(dir) = true;
-    } else {
-      block_size.symmetry(dir) = false;
-      mesh_size.symmetry(dir) = false;
-    }
-    // calculate the number of the blocks
-    nrbx[dir - 1] = mesh_size.nx(dir) / block_size.nx(dir);
-  }
-  base_block_size = block_size;
-
-  // Load balancing flag and parameters
-  RegisterLoadBalancing_(pin);
-
-  // SMR / AMR
-  if (adaptive) {
-    // read from file or from input?  input for now.
-    //    max_level = rr.GetAttr<int>("Info", "MaxLevel");
-    max_level = pin->GetOrAddInteger("parthenon/mesh", "numlevel", 1) + root_level - 1;
-    if (max_level > 63) {
-      msg << "### FATAL ERROR in Mesh constructor" << std::endl
-          << "The number of the refinement level must be smaller than "
-          << 63 - root_level + 1 << "." << std::endl;
-      PARTHENON_FAIL(msg);
-    }
-  } else {
-    max_level = 63;
-  }
-
-  InitUserMeshData(this, pin);
-
-  // Populate logical locations
-  auto lx123 = rr.ReadDataset<int64_t>("/Blocks/loc.lx123");
-  auto locLevelGidLidCnghostGflag =
-      rr.ReadDataset<int>("/Blocks/loc.level-gid-lid-cnghost-gflag");
-  current_level = -1;
-  for (int i = 0; i < nbtotal; i++) {
-    loclist[i] = LogicalLocation(locLevelGidLidCnghostGflag[5 * i], lx123[3 * i],
-                                 lx123[3 * i + 1], lx123[3 * i + 2]);
-
-    if (loclist[i].level() > current_level) {
-      current_level = loclist[i].level();
-    }
-  }
-  // rebuild the Block Tree
-  tree.CreateRootGrid();
-
-  for (int i = 0; i < nbtotal; i++) {
-    tree.AddMeshBlockWithoutRefine(loclist[i]);
-  }
-
-  int nnb;
-  // check the tree structure, and assign GID
-  tree.GetMeshBlockList(loclist.data(), nullptr, nnb);
-  if (nnb != nbtotal) {
-    msg << "### FATAL ERROR in Mesh constructor" << std::endl
-        << "Tree reconstruction failed. The total numbers of the blocks do not match. ("
-        << nbtotal << " != " << nnb << ")" << std::endl;
-    PARTHENON_FAIL(msg);
-  }
-
-#ifdef MPI_PARALLEL
-  if (nbtotal < Globals::nranks) {
-    if (mesh_test == 0) {
-      msg << "### FATAL ERROR in Mesh constructor" << std::endl
-          << "Too few mesh blocks: nbtotal (" << nbtotal << ") < nranks ("
-          << Globals::nranks << ")" << std::endl;
-      PARTHENON_FAIL(msg);
-    } else { // test
-      std::cout << "### Warning in Mesh constructor" << std::endl
-                << "Too few mesh blocks: nbtotal (" << nbtotal << ") < nranks ("
-                << Globals::nranks << ")" << std::endl;
-      return;
-    }
-  }
-#endif
-  costlist = std::vector<double>(nbtotal, 1.0);
-  ranklist = std::vector<int>(nbtotal);
-  nslist = std::vector<int>(Globals::nranks);
-  nblist = std::vector<int>(Globals::nranks);
-
-  if (adaptive) { // allocate arrays for AMR
-    nref = std::vector<int>(Globals::nranks);
-    nderef = std::vector<int>(Globals::nranks);
-    rdisp = std::vector<int>(Globals::nranks);
-    ddisp = std::vector<int>(Globals::nranks);
-    bnref = std::vector<int>(Globals::nranks);
-    bnderef = std::vector<int>(Globals::nranks);
-    brdisp = std::vector<int>(Globals::nranks);
-    bddisp = std::vector<int>(Globals::nranks);
-  }
-
-  CalculateLoadBalance(costlist, ranklist, nslist, nblist);
-  PopulateLeafLocationMap();
-
-  // Output MeshBlock list and quit (mesh test only); do not create meshes
-  if (mesh_test > 0) {
-    if (Globals::my_rank == 0) OutputMeshStructure(ndim);
-    return;
-  }
-
-  // allocate data buffer
-  int nb = nblist[Globals::my_rank];
-  int nbs = nslist[Globals::my_rank];
-  int nbe = nbs + nb - 1;
-
-  mesh_data.SetMeshPointer(this);
-
-  resolved_packages = ResolvePackages(packages);
-
-  // Register user defined boundary conditions
-  UserBoundaryFunctions = resolved_packages->UserBoundaryFunctions;
-
-  // Setup unique comms for each variable and swarm
-  SetupMPIComms();
-
-  // Create MeshBlocks (parallel)
-  block_list.clear();
-  block_list.resize(nbe - nbs + 1);
-  for (int i = nbs; i <= nbe; i++) {
-    for (auto &v : block_bcs) {
-      v = parthenon::BoundaryFlag::undef;
-    }
-    SetBlockSizeAndBoundaries(loclist[i], block_size, block_bcs);
-
     // create a block and add into the link list
     block_list[i - nbs] =
         MeshBlock::Make(i, i - nbs, loclist[i], block_size, block_bcs, this, pin, app_in,
                         packages, resolved_packages, gflag, costlist[i]);
-    block_list[i - nbs]->SearchAndSetNeighbors(this, tree, ranklist.data(),
-                                               nslist.data());
+    if (block_list[i - nbs]->pmr)
+      block_list[i - nbs]->pmr->DerefinementCount() =
+          dealloc_count.count(loclist[i]) ? dealloc_count.at(loclist[i]) : 0;
   }
-  SetSameLevelNeighbors(block_list, leaf_grid_locs, this->GetRootGridInfo(), nbs, false);
-  BuildGMGHierarchy(nbs, pin, app_in);
+  BuildBlockPartitions(GridIdentifier::leaf());
+  BuildGMGBlockLists(pin, app_in);
+  SetMeshBlockNeighbors(GridIdentifier::leaf(), block_list, ranklist);
+  SetGMGNeighbors();
   ResetLoadBalanceVariables();
 }
 
@@ -707,6 +392,23 @@ Mesh::~Mesh() {
 }
 
 //----------------------------------------------------------------------------------------
+//  \brief Partition a given block list for use by MeshData
+
+void Mesh::BuildBlockPartitions(GridIdentifier grid) {
+  auto partition_blocklists = partition::ToSizeN(
+      grid.type == GridType::leaf ? block_list : gmg_block_lists[grid.logical_level],
+      DefaultPackSize());
+  // Account for possibly empty block_list
+  if (partition_blocklists.size() == 0)
+    partition_blocklists = std::vector<BlockList_t>(1);
+  std::vector<std::shared_ptr<BlockListPartition>> out;
+  int id = 0;
+  for (auto &part_bl : partition_blocklists)
+    out.emplace_back(std::make_shared<BlockListPartition>(id++, grid, part_bl, this));
+  block_partitions_[grid] = out;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void Mesh::OutputMeshStructure(int ndim)
 //  \brief print the mesh structure information
 
@@ -717,8 +419,7 @@ void Mesh::OutputMeshStructure(const int ndim,
 
   // Write overall Mesh structure to stdout and file
   std::cout << std::endl;
-  std::cout << "Root grid = " << nrbx[0] << " x " << nrbx[1] << " x " << nrbx[2]
-            << " MeshBlocks" << std::endl;
+  std::cout << "Number of Trees = " << forest.CountTrees() << std::endl;
   std::cout << "Total number of MeshBlocks = " << nbtotal << std::endl;
   std::cout << "Number of physical refinement levels = " << (current_level - root_level)
             << std::endl;
@@ -849,69 +550,207 @@ void Mesh::OutputMeshStructure(const int ndim,
 }
 
 //----------------------------------------------------------------------------------------
-//  Enroll user-defined functions for boundary conditions
-void Mesh::EnrollBndryFncts_(ApplicationInput *app_in) {
-  static const BValFunc outflow[6] = {
-      BoundaryFunction::OutflowInnerX1, BoundaryFunction::OutflowOuterX1,
-      BoundaryFunction::OutflowInnerX2, BoundaryFunction::OutflowOuterX2,
-      BoundaryFunction::OutflowInnerX3, BoundaryFunction::OutflowOuterX3};
-  static const BValFunc reflect[6] = {
-      BoundaryFunction::ReflectInnerX1, BoundaryFunction::ReflectOuterX1,
-      BoundaryFunction::ReflectInnerX2, BoundaryFunction::ReflectOuterX2,
-      BoundaryFunction::ReflectInnerX3, BoundaryFunction::ReflectOuterX3};
+// \!fn void Mesh::ApplyUserWorkBeforeOutput(ParameterInput *pin)
+// \brief Apply MeshBlock::UserWorkBeforeOutput
 
-  for (int f = 0; f < BOUNDARY_NFACES; f++) {
-    switch (mesh_bcs[f]) {
-    case BoundaryFlag::reflect:
-      MeshBndryFnctn[f] = reflect[f];
-      break;
-    case BoundaryFlag::outflow:
-      MeshBndryFnctn[f] = outflow[f];
-      break;
-    case BoundaryFlag::user:
-      if (app_in->boundary_conditions[f] != nullptr) {
-        MeshBndryFnctn[f] = app_in->boundary_conditions[f];
-      } else {
-        std::stringstream msg;
-        msg << "A user boundary condition for face " << f
-            << " was requested. but no condition was enrolled." << std::endl;
-        PARTHENON_THROW(msg);
-      }
-      break;
-    default: // periodic/block BCs handled elsewhere.
-      break;
-    }
+void Mesh::ApplyUserWorkBeforeOutput(Mesh *mesh, ParameterInput *pin,
+                                     SimTime const &time) {
+  // call Mesh version
+  if (mesh->UserMeshWorkBeforeOutput != nullptr) {
+    mesh->UserMeshWorkBeforeOutput(mesh, pin, time);
+  }
 
-    switch (mesh_bcs[f]) {
-    case BoundaryFlag::user:
-      if (app_in->swarm_boundary_conditions[f] != nullptr) {
-        // This is checked to be non-null later in Swarm::AllocateBoundaries, in case user
-        // boundaries are requested but no swarms are used.
-        SwarmBndryFnctn[f] = app_in->swarm_boundary_conditions[f];
-      }
-      break;
-    default: // Default BCs handled elsewhere
-      break;
+  // call MeshBlock version
+  for (auto &pmb : block_list) {
+    if (pmb->UserWorkBeforeOutput != nullptr) {
+      pmb->UserWorkBeforeOutput(pmb.get(), pin, time);
     }
   }
 }
 
 //----------------------------------------------------------------------------------------
-// \!fn void Mesh::ApplyUserWorkBeforeOutput(ParameterInput *pin)
-// \brief Apply MeshBlock::UserWorkBeforeOutput
+// \!fn void Mesh::ApplyUserWorkBeforeRestartOutput
+// \brief Apply Mesh and Meshblock versions of UserWorkBeforeRestartOutput
+void Mesh::ApplyUserWorkBeforeRestartOutput(Mesh *mesh, ParameterInput *pin,
+                                            SimTime const &time,
+                                            OutputParameters *pparams) {
+  if (mesh->UserWorkBeforeRestartOutput != nullptr) {
+    mesh->UserWorkBeforeRestartOutput(mesh, pin, time, pparams);
+  }
+}
 
-void Mesh::ApplyUserWorkBeforeOutput(ParameterInput *pin) {
-  for (auto &pmb : block_list) {
-    pmb->UserWorkBeforeOutput(pmb.get(), pin);
+void Mesh::BuildTagMapAndBoundaryBuffers() {
+  const int num_partitions = DefaultNumPartitions();
+  const int nmb = GetNumMeshBlocksThisRank(Globals::my_rank);
+
+  // Build densely populated communication tags
+  tag_map.clear();
+  for (auto &partition : GetDefaultBlockPartitions()) {
+    auto &md = mesh_data.Add("base", partition);
+    tag_map.AddMeshDataToMap<BoundaryType::any>(md);
+  }
+
+  if (multigrid) {
+    for (int gmg_level = GetGMGMinLevel(); gmg_level <= GetGMGMaxLevel(); ++gmg_level) {
+      const auto grid_id = GridIdentifier::two_level_composite(gmg_level);
+      for (auto &partition : GetDefaultBlockPartitions(grid_id)) {
+        auto &md = mesh_data.Add("base", partition);
+        tag_map.AddMeshDataToMap<BoundaryType::gmg_same>(md);
+        tag_map.AddMeshDataToMap<BoundaryType::gmg_prolongate_send>(md);
+        tag_map.AddMeshDataToMap<BoundaryType::gmg_restrict_send>(md);
+        tag_map.AddMeshDataToMap<BoundaryType::gmg_prolongate_recv>(md);
+        tag_map.AddMeshDataToMap<BoundaryType::gmg_restrict_recv>(md);
+      }
+    }
+  }
+
+  tag_map.ResolveMap();
+
+  // Create send/recv MPI_Requests for swarms
+  for (int i = 0; i < nmb; ++i) {
+    auto &pmb = block_list[i];
+    pmb->meshblock_data.Get()->GetSwarmData()->SetupPersistentMPI();
+  }
+
+  // Wait for boundary buffers to be no longer in use
+  bool can_delete;
+  std::int64_t test_iters = 0;
+  constexpr std::int64_t max_it = 1e10;
+  do {
+    can_delete = true;
+    for (auto &[k, comm] : boundary_comm_map) {
+      can_delete = comm.IsSafeToDelete() && can_delete;
+    }
+    test_iters++;
+  } while (!can_delete && test_iters < max_it);
+  PARTHENON_REQUIRE(
+      test_iters < max_it,
+      "Too many iterations waiting to delete boundary communication buffers.");
+
+  // Clear boundary communication buffers
+  boundary_comm_map.clear();
+
+  // Build the boundary buffers for the current mesh
+  for (auto &partition : GetDefaultBlockPartitions()) {
+    auto &md = mesh_data.Add("base", partition);
+    BuildBoundaryBuffers(md);
+  }
+  if (multigrid) {
+    for (int gmg_level = GetGMGMinLevel(); gmg_level <= GetGMGMaxLevel(); ++gmg_level) {
+      const auto grid_id = GridIdentifier::two_level_composite(gmg_level);
+      for (auto &partition : GetDefaultBlockPartitions(grid_id)) {
+        auto &mdg = mesh_data.Add("base", partition);
+        BuildBoundaryBuffers(mdg);
+        BuildGMGBoundaryBuffers(mdg);
+      }
+    }
+  }
+}
+
+void Mesh::CommunicateBoundaries(std::string md_name) {
+  const int num_partitions = DefaultNumPartitions();
+  const int nmb = GetNumMeshBlocksThisRank(Globals::my_rank);
+  constexpr std::int64_t max_it = 1e10;
+  std::vector<bool> sent(num_partitions, false);
+  bool all_sent;
+  std::int64_t send_iters = 0;
+
+  auto partitions = GetDefaultBlockPartitions();
+  do {
+    all_sent = true;
+    for (int i = 0; i < partitions.size(); ++i) {
+      auto &md = mesh_data.Add(md_name, partitions[i]);
+      if (!sent[i]) {
+        if (SendBoundaryBuffers(md) != TaskStatus::complete) {
+          all_sent = false;
+        } else {
+          sent[i] = true;
+        }
+      }
+    }
+    send_iters++;
+  } while (!all_sent && send_iters < max_it);
+  PARTHENON_REQUIRE(
+      send_iters < max_it,
+      "Too many iterations waiting to send boundary communication buffers.");
+
+  // wait to receive FillGhost variables
+  // TODO(someone) evaluate if ReceiveWithWait kind of logic is better, also related to
+  // https://github.com/lanl/parthenon/issues/418
+  std::vector<bool> received(num_partitions, false);
+  bool all_received;
+  std::int64_t receive_iters = 0;
+  do {
+    all_received = true;
+    for (int i = 0; i < partitions.size(); ++i) {
+      auto &md = mesh_data.Add(md_name, partitions[i]);
+      if (!received[i]) {
+        if (ReceiveBoundaryBuffers(md) != TaskStatus::complete) {
+          all_received = false;
+        } else {
+          received[i] = true;
+        }
+      }
+    }
+    receive_iters++;
+  } while (!all_received && receive_iters < max_it);
+  PARTHENON_REQUIRE(
+      receive_iters < max_it,
+      "Too many iterations waiting to receive boundary communication buffers.");
+
+  for (auto &partition : partitions) {
+    auto &md = mesh_data.Add(md_name, partition);
+    // unpack FillGhost variables
+    SetBoundaries(md);
+  }
+
+  //  Now do prolongation, compute primitives, apply BCs
+  for (auto &partition : partitions) {
+    auto &md = mesh_data.Add(md_name, partition);
+    if (multilevel) {
+      ApplyBoundaryConditionsOnCoarseOrFineMD(md, true);
+      ProlongateBoundaries(md);
+    }
+    ApplyBoundaryConditionsOnCoarseOrFineMD(md, false);
+  }
+}
+
+void Mesh::PreCommFillDerived() {
+  const int num_partitions = DefaultNumPartitions();
+  const int nmb = GetNumMeshBlocksThisRank(Globals::my_rank);
+  // Pre comm fill derived
+  for (int i = 0; i < nmb; ++i) {
+    auto &mbd = block_list[i]->meshblock_data.Get();
+    Update::PreCommFillDerived(mbd.get());
+  }
+  for (auto &partition : GetDefaultBlockPartitions()) {
+    auto &md = mesh_data.Add("base", partition);
+    Update::PreCommFillDerived(md.get());
+  }
+}
+
+void Mesh::FillDerived() {
+  const int num_partitions = DefaultNumPartitions();
+  const int nmb = GetNumMeshBlocksThisRank(Globals::my_rank);
+  for (auto &partition : GetDefaultBlockPartitions()) {
+    auto &md = mesh_data.Add("base", partition);
+    // Call MeshData based FillDerived functions
+    Update::FillDerived(md.get());
+  }
+
+  for (int i = 0; i < nmb; ++i) {
+    auto &mbd = block_list[i]->meshblock_data.Get();
+    // Call MeshBlockData based FillDerived functions
+    Update::FillDerived(mbd.get());
   }
 }
 
 //----------------------------------------------------------------------------------------
 // \!fn void Mesh::Initialize(bool init_problem, ParameterInput *pin)
-// \brief  initialization before the main loop as well as during remeshing
+// \brief  initialization before the main loop
 
 void Mesh::Initialize(bool init_problem, ParameterInput *pin, ApplicationInput *app_in) {
-  Kokkos::Profiling::pushRegion("Mesh::Initialize");
+  PARTHENON_INSTRUMENT
   bool init_done = true;
   const int nb_initial = nbtotal;
   do {
@@ -920,7 +759,9 @@ void Mesh::Initialize(bool init_problem, ParameterInput *pin, ApplicationInput *
     // init meshblock data
     for (int i = 0; i < nmb; ++i) {
       MeshBlock *pmb = block_list[i].get();
-      pmb->InitMeshBlockUserData(pmb, pin);
+      if (pmb->InitMeshBlockUserData != nullptr) {
+        pmb->InitMeshBlockUserData(pmb, pin);
+      }
     }
 
     const int num_partitions = DefaultNumPartitions();
@@ -930,163 +771,59 @@ void Mesh::Initialize(bool init_problem, ParameterInput *pin, ApplicationInput *
       PARTHENON_REQUIRE_THROWS(
           !(ProblemGenerator != nullptr && block_list[0]->ProblemGenerator != nullptr),
           "Mesh and MeshBlock ProblemGenerators are defined. Please use only one.");
+      PARTHENON_REQUIRE_THROWS(
+          !(PostInitialization != nullptr &&
+            block_list[0]->PostInitialization != nullptr),
+          "Mesh and MeshBlock PostInitializations are defined. Please use only one.");
 
       // Call Mesh ProblemGenerator
       if (ProblemGenerator != nullptr) {
-        PARTHENON_REQUIRE(num_partitions == 1,
-                          "Mesh ProblemGenerator requires parthenon/mesh/pack_size=-1 "
-                          "during first initialization.");
-
-        auto &md = mesh_data.GetOrAdd("base", 0);
-        ProblemGenerator(this, pin, md.get());
+        for (auto &partition : GetDefaultBlockPartitions(GridIdentifier::leaf())) {
+          auto &md = mesh_data.Add("base", partition);
+          ProblemGenerator(this, pin, md.get());
+        }
         // Call individual MeshBlock ProblemGenerator
       } else {
         for (int i = 0; i < nmb; ++i) {
           auto &pmb = block_list[i];
-          pmb->ProblemGenerator(pmb.get(), pin);
+          if (pmb->ProblemGenerator != nullptr) {
+            pmb->ProblemGenerator(pmb.get(), pin);
+          }
         }
       }
+
+      // Call Mesh PostInitialization
+      if (PostInitialization != nullptr) {
+        for (auto &partition : GetDefaultBlockPartitions(GridIdentifier::leaf())) {
+          auto &md = mesh_data.Add("base", partition);
+          PostInitialization(this, pin, md.get());
+        }
+        // Call individual MeshBlock PostInitialization
+      } else {
+        for (int i = 0; i < nmb; ++i) {
+          auto &pmb = block_list[i];
+          if (pmb->PostInitialization != nullptr) {
+            pmb->PostInitialization(pmb.get(), pin);
+          }
+        }
+      }
+
       std::for_each(block_list.begin(), block_list.end(),
                     [](auto &sp_block) { sp_block->SetAllVariablesToInitialized(); });
     }
 
-    // Pre comm fill derived
-    for (int i = 0; i < nmb; ++i) {
-      auto &mbd = block_list[i]->meshblock_data.Get();
-      Update::PreCommFillDerived(mbd.get());
-    }
-    for (int i = 0; i < num_partitions; ++i) {
-      auto &md = mesh_data.GetOrAdd("base", i);
-      Update::PreCommFillDerived(md.get());
-    }
+    PreCommFillDerived();
 
-    // Build densely populated communication tags
-    tag_map.clear();
-    for (int i = 0; i < num_partitions; i++) {
-      auto &md = mesh_data.GetOrAdd("base", i);
-      tag_map.AddMeshDataToMap<BoundaryType::any>(md);
-      for (int gmg_level = 0; gmg_level < gmg_mesh_data.size(); ++gmg_level) {
-        auto &mdg = gmg_mesh_data[gmg_level].GetOrAdd(gmg_level, "base", i);
-        // tag_map.AddMeshDataToMap<BoundaryType::any>(mdg);
-        tag_map.AddMeshDataToMap<BoundaryType::gmg_same>(mdg);
-        tag_map.AddMeshDataToMap<BoundaryType::gmg_prolongate_send>(mdg);
-        tag_map.AddMeshDataToMap<BoundaryType::gmg_restrict_send>(mdg);
-        tag_map.AddMeshDataToMap<BoundaryType::gmg_prolongate_recv>(mdg);
-        tag_map.AddMeshDataToMap<BoundaryType::gmg_restrict_recv>(mdg);
-      }
-    }
-    tag_map.ResolveMap();
+    BuildTagMapAndBoundaryBuffers();
 
-    // Create send/recv MPI_Requests for all BoundaryData objects
-    for (int i = 0; i < nmb; ++i) {
-      auto &pmb = block_list[i];
-      pmb->swarm_data.Get()->SetupPersistentMPI();
-    }
+    CommunicateBoundaries();
 
-    // send FillGhost variables
-    bool can_delete;
-    std::int64_t test_iters = 0;
-    constexpr std::int64_t max_it = 1e10;
-    do {
-      can_delete = true;
-      for (auto &[k, comm] : boundary_comm_map) {
-        can_delete = comm.IsSafeToDelete() && can_delete;
-      }
-      test_iters++;
-    } while (!can_delete && test_iters < max_it);
-    PARTHENON_REQUIRE(
-        test_iters < max_it,
-        "Too many iterations waiting to delete boundary communication buffers.");
-
-    boundary_comm_map.clear();
-    boundary_comm_flxcor_map.clear();
-
-    for (int i = 0; i < num_partitions; i++) {
-      auto &md = mesh_data.GetOrAdd("base", i);
-      BuildBoundaryBuffers(md);
-      for (int gmg_level = 0; gmg_level < gmg_mesh_data.size(); ++gmg_level) {
-        auto &mdg = gmg_mesh_data[gmg_level].GetOrAdd(gmg_level, "base", i);
-        BuildBoundaryBuffers(mdg);
-        BuildGMGBoundaryBuffers(mdg);
-      }
-    }
-
-    std::vector<bool> sent(num_partitions, false);
-    bool all_sent;
-    std::int64_t send_iters = 0;
-    do {
-      all_sent = true;
-      for (int i = 0; i < num_partitions; i++) {
-        auto &md = mesh_data.GetOrAdd("base", i);
-        if (!sent[i]) {
-          if (SendBoundaryBuffers(md) != TaskStatus::complete) {
-            all_sent = false;
-          } else {
-            sent[i] = true;
-          }
-        }
-      }
-      send_iters++;
-    } while (!all_sent && send_iters < max_it);
-    PARTHENON_REQUIRE(
-        send_iters < max_it,
-        "Too many iterations waiting to send boundary communication buffers.");
-
-    // wait to receive FillGhost variables
-    // TODO(someone) evaluate if ReceiveWithWait kind of logic is better, also related to
-    // https://github.com/lanl/parthenon/issues/418
-    std::vector<bool> received(num_partitions, false);
-    bool all_received;
-    std::int64_t receive_iters = 0;
-    do {
-      all_received = true;
-      for (int i = 0; i < num_partitions; i++) {
-        auto &md = mesh_data.GetOrAdd("base", i);
-        if (!received[i]) {
-          if (ReceiveBoundaryBuffers(md) != TaskStatus::complete) {
-            all_received = false;
-          } else {
-            received[i] = true;
-          }
-        }
-      }
-      receive_iters++;
-    } while (!all_received && receive_iters < max_it);
-    PARTHENON_REQUIRE(
-        receive_iters < max_it,
-        "Too many iterations waiting to receive boundary communication buffers.");
-
-    for (int i = 0; i < num_partitions; i++) {
-      auto &md = mesh_data.GetOrAdd("base", i);
-      // unpack FillGhost variables
-      SetBoundaries(md);
-    }
-
-    //  Now do prolongation, compute primitives, apply BCs
-    for (int i = 0; i < num_partitions; i++) {
-      auto &md = mesh_data.GetOrAdd("base", i);
-      if (multilevel) {
-        ApplyBoundaryConditionsOnCoarseOrFineMD(md, true);
-        ProlongateBoundaries(md);
-      }
-      ApplyBoundaryConditionsOnCoarseOrFineMD(md, false);
-      // Call MeshData based FillDerived functions
-      Update::FillDerived(md.get());
-    }
-
-    for (int i = 0; i < nmb; ++i) {
-      auto &mbd = block_list[i]->meshblock_data.Get();
-      // Call MeshBlockData based FillDerived functions
-      Update::FillDerived(mbd.get());
-    }
+    FillDerived();
 
     if (init_problem && adaptive) {
       for (int i = 0; i < nmb; ++i) {
         block_list[i]->pmr->CheckRefinementCondition();
       }
-    }
-
-    if (init_problem && adaptive) {
       init_done = false;
       // caching nbtotal the private variable my be updated in the following function
       const int nb_before_loadbalance = nbtotal;
@@ -1111,9 +848,7 @@ void Mesh::Initialize(bool init_problem, ParameterInput *pin, ApplicationInput *
   } while (!init_done);
 
   // Initialize the "base" MeshData object
-  mesh_data.Get()->Set(block_list, this);
-
-  Kokkos::Profiling::popRegion(); // Mesh::Initialize
+  mesh_data.Get()->Initialize(block_list, this);
 }
 
 /// Finds location of a block with ID `tgid`.
@@ -1135,65 +870,11 @@ std::shared_ptr<MeshBlock> Mesh::FindMeshBlock(int tgid) const {
 bool Mesh::SetBlockSizeAndBoundaries(LogicalLocation loc, RegionSize &block_size,
                                      BoundaryFlag *block_bcs) {
   bool valid_region = true;
-  block_size = GetBlockSize(loc);
-  for (auto &dir : {X1DIR, X2DIR, X3DIR}) {
-    if (!block_size.symmetry(dir)) {
-      std::int64_t nrbx_ll = nrbx[dir - 1] << (loc.level() - root_level);
-      if (loc.level() < root_level) {
-        std::int64_t fac = 1 << (root_level - loc.level());
-        nrbx_ll = nrbx[dir - 1] / fac + (nrbx[dir - 1] % fac != 0);
-      }
-      block_bcs[GetInnerBoundaryFace(dir)] =
-          loc.l(dir - 1) == 0 ? mesh_bcs[GetInnerBoundaryFace(dir)] : BoundaryFlag::block;
-      block_bcs[GetOuterBoundaryFace(dir)] = loc.l(dir - 1) == nrbx_ll - 1
-                                                 ? mesh_bcs[GetOuterBoundaryFace(dir)]
-                                                 : BoundaryFlag::block;
-    } else {
-      block_bcs[GetInnerBoundaryFace(dir)] = mesh_bcs[GetInnerBoundaryFace(dir)];
-      block_bcs[GetOuterBoundaryFace(dir)] = mesh_bcs[GetOuterBoundaryFace(dir)];
-    }
-  }
+  block_size = forest.GetBlockDomain(loc);
+  auto bcs = forest.GetBlockBCs(loc);
+  for (int i = 0; i < BOUNDARY_NFACES; ++i)
+    block_bcs[i] = bcs[i];
   return valid_region;
-}
-
-//----------------------------------------------------------------------------------------
-// \!fn void Mesh::GetBlockSize(const LogicalLocation &loc) const
-// \brief Find the (hyper-)rectangular region of the grid covered by the block at
-//        logical location loc
-
-RegionSize Mesh::GetBlockSize(const LogicalLocation &loc) const {
-  RegionSize block_size = GetBlockSize();
-  bool valid_region = true;
-  for (auto &dir : {X1DIR, X2DIR, X3DIR}) {
-    block_size.xrat(dir) = mesh_size.xrat(dir);
-    block_size.symmetry(dir) = mesh_size.symmetry(dir);
-    if (!block_size.symmetry(dir)) {
-      std::int64_t nrbx_ll = nrbx[dir - 1] << (loc.level() - root_level);
-      if (loc.level() < root_level) {
-        std::int64_t fac = 1 << (root_level - loc.level());
-        nrbx_ll = nrbx[dir - 1] / fac + (nrbx[dir - 1] % fac != 0);
-      }
-      block_size.xmin(dir) = GetMeshCoordinate(dir, BlockLocation::Left, loc);
-      block_size.xmax(dir) = GetMeshCoordinate(dir, BlockLocation::Right, loc);
-      // Correct for possible overshooting, since the root grid may not cover the
-      // entire logical level zero block of the mesh
-      if (block_size.xmax(dir) > mesh_size.xmax(dir) || loc.level() < 0) {
-        // Need integer reduction factor, so transform location back to root level
-        PARTHENON_REQUIRE(loc.level() < root_level, "Something is messed up.");
-        std::int64_t loc_low = loc.l(dir - 1) << (root_level - loc.level());
-        std::int64_t loc_hi = (loc.l(dir - 1) + 1) << (root_level - loc.level());
-        if (block_size.nx(dir) * (nrbx[dir - 1] - loc_low) % (loc_hi - loc_low) != 0)
-          valid_region = false;
-        block_size.nx(dir) =
-            block_size.nx(dir) * (nrbx[dir - 1] - loc_low) / (loc_hi - loc_low);
-        block_size.xmax(dir) = mesh_size.xmax(dir);
-      }
-    } else {
-      block_size.xmin(dir) = mesh_size.xmin(dir);
-      block_size.xmax(dir) = mesh_size.xmax(dir);
-    }
-  }
-  return block_size;
 }
 
 std::int64_t Mesh::GetTotalCells() {
@@ -1201,11 +882,22 @@ std::int64_t Mesh::GetTotalCells() {
   return static_cast<std::int64_t>(nbtotal) * pmb->block_size.nx(X1DIR) *
          pmb->block_size.nx(X2DIR) * pmb->block_size.nx(X3DIR);
 }
+
 // TODO(JMM): Move block_size into mesh.
 int Mesh::GetNumberOfMeshBlockCells() const {
   return block_list.front()->GetNumberOfMeshBlockCells();
 }
-const RegionSize &Mesh::GetBlockSize() const { return base_block_size; }
+
+const IndexShape &Mesh::GetLeafBlockCellBounds(CellLevel level) const {
+  MeshBlock *pmb = block_list[0].get();
+  if (level == CellLevel::same) {
+    return pmb->cellbounds;
+  } else if (level == CellLevel::fine) {
+    return pmb->f_cellbounds;
+  } else { // if (level == CellLevel::coarse) {
+    return pmb->c_cellbounds;
+  }
+}
 
 // Functionality re-used in mesh constructor
 void Mesh::RegisterLoadBalancing_(ParameterInput *pin) {
@@ -1238,23 +930,14 @@ void Mesh::SetupMPIComms() {
     auto &metadata = pair.second;
     // Create both boundary and flux communicators for everything with either FillGhost
     // or WithFluxes just to be safe
-    if (metadata.IsSet(Metadata::FillGhost) || metadata.IsSet(Metadata::WithFluxes) ||
+    if (metadata.IsSet(Metadata::FillGhost) || metadata.IsSet(Metadata::Independent) ||
         metadata.IsSet(Metadata::ForceRemeshComm) ||
         metadata.IsSet(Metadata::GMGProlongate) ||
-        metadata.IsSet(Metadata::GMGRestrict)) {
+        metadata.IsSet(Metadata::GMGRestrict) || metadata.IsSet(Metadata::Flux)) {
       MPI_Comm mpi_comm;
       PARTHENON_MPI_CHECK(MPI_Comm_dup(MPI_COMM_WORLD, &mpi_comm));
       const auto ret = mpi_comm_map_.insert({pair.first.label(), mpi_comm});
       PARTHENON_REQUIRE_THROWS(ret.second, "Communicator with same name already in map");
-
-      if (multilevel) {
-        MPI_Comm mpi_comm_flcor;
-        PARTHENON_MPI_CHECK(MPI_Comm_dup(MPI_COMM_WORLD, &mpi_comm_flcor));
-        const auto ret =
-            mpi_comm_map_.insert({pair.first.label() + "_flcor", mpi_comm_flcor});
-        PARTHENON_REQUIRE_THROWS(ret.second,
-                                 "Flux corr. communicator with same name already in map");
-      }
     }
   }
   for (auto &pair : resolved_packages->AllSwarms()) {
@@ -1267,6 +950,224 @@ void Mesh::SetupMPIComms() {
   // are currently not handled in pmb->meshblock_data.Get()->SetupPersistentMPI(); nor
   // inserted into pmb->pbval->bvars.
 #endif
+}
+
+void Mesh::CheckMeshValidity() const {
+  std::stringstream msg;
+  // check number of OpenMP threads for mesh
+  if (num_mesh_threads_ < 1) {
+    msg << "### FATAL ERROR in Mesh constructor" << std::endl
+        << "Number of OpenMP threads must be >= 1, but num_threads=" << num_mesh_threads_
+        << std::endl;
+    PARTHENON_FAIL(msg);
+  }
+
+  for (auto &[dir, label] : std::vector<std::pair<CoordinateDirection, std::string>>{
+           {X1DIR, "1"}, {X2DIR, "2"}, {X3DIR, "3"}}) {
+    // check number of grid cells in root level of mesh from input file.
+    if (mesh_size.nx(dir) < 1) {
+      msg << "### FATAL ERROR in Mesh constructor" << std::endl
+          << "In mesh block in input file nx" + label + " must be >= 1, but nx" + label +
+                 "="
+          << mesh_size.nx(dir) << std::endl;
+      PARTHENON_FAIL(msg);
+    }
+    // check physical size of mesh (root level) from input file.
+    if (mesh_size.xmax(dir) <= mesh_size.xmin(dir)) {
+      msg << "### FATAL ERROR in Mesh constructor" << std::endl
+          << "Input x" + label + "max must be larger than x" + label + "min: x" + label +
+                 "min="
+          << mesh_size.xmin(dir) << " x" + label + "max=" << mesh_size.xmax(dir)
+          << std::endl;
+      PARTHENON_FAIL(msg);
+    }
+  }
+
+  if (mesh_size.nx(X2DIR) == 1 && mesh_size.nx(X3DIR) > 1) {
+    msg << "### FATAL ERROR in Mesh constructor" << std::endl
+        << "In mesh block in input file: nx2=1, nx3=" << mesh_size.nx(X3DIR)
+        << ", 2D problems in x1-x3 plane not supported" << std::endl;
+    PARTHENON_FAIL(msg);
+  }
+
+  // check the consistency of the periodic boundaries
+  if (((mesh_bcs[BoundaryFace::inner_x1] == BoundaryFlag::periodic &&
+        mesh_bcs[BoundaryFace::outer_x1] != BoundaryFlag::periodic) ||
+       (mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic &&
+        mesh_bcs[BoundaryFace::outer_x1] == BoundaryFlag::periodic)) ||
+      (mesh_size.nx(X2DIR) > 1 &&
+       ((mesh_bcs[BoundaryFace::inner_x2] == BoundaryFlag::periodic &&
+         mesh_bcs[BoundaryFace::outer_x2] != BoundaryFlag::periodic) ||
+        (mesh_bcs[BoundaryFace::inner_x2] != BoundaryFlag::periodic &&
+         mesh_bcs[BoundaryFace::outer_x2] == BoundaryFlag::periodic))) ||
+      (mesh_size.nx(X3DIR) > 1 &&
+       ((mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::periodic &&
+         mesh_bcs[BoundaryFace::outer_x3] != BoundaryFlag::periodic) ||
+        (mesh_bcs[BoundaryFace::inner_x3] != BoundaryFlag::periodic &&
+         mesh_bcs[BoundaryFace::outer_x3] == BoundaryFlag::periodic)))) {
+    msg << "### FATAL ERROR in Mesh constructor" << std::endl
+        << "When periodic boundaries are in use, both sides must be periodic."
+        << std::endl;
+    PARTHENON_FAIL(msg);
+  }
+
+  // check consistency of the block and mesh
+  if (mesh_size.nx(X1DIR) % base_block_size.nx(X1DIR) != 0 ||
+      mesh_size.nx(X2DIR) % base_block_size.nx(X2DIR) != 0 ||
+      mesh_size.nx(X3DIR) % base_block_size.nx(X3DIR) != 0) {
+    msg << "### FATAL ERROR in Mesh constructor" << std::endl
+        << "the Mesh must be evenly divisible by the MeshBlock" << std::endl;
+    PARTHENON_FAIL(msg);
+  }
+  if (base_block_size.nx(X1DIR) < 4 || (base_block_size.nx(X2DIR) < 4 && (ndim >= 2)) ||
+      (base_block_size.nx(X3DIR) < 4 && (ndim >= 3))) {
+    msg << "### FATAL ERROR in Mesh constructor" << std::endl
+        << "block_size must be larger than or equal to 4 cells." << std::endl;
+    PARTHENON_FAIL(msg);
+  }
+
+  if (max_level > 63) {
+    msg << "### FATAL ERROR in Mesh constructor" << std::endl
+        << "The number of the refinement level must be smaller than "
+        << 63 - root_level + 1 << "." << std::endl;
+    PARTHENON_FAIL(msg);
+  }
+
+  if (multilevel) {
+    if (base_block_size.nx(X1DIR) % 2 == 1 ||
+        (base_block_size.nx(X2DIR) % 2 == 1 && (ndim >= 2)) ||
+        (base_block_size.nx(X3DIR) % 2 == 1 && (ndim >= 3))) {
+      msg << "### FATAL ERROR in Mesh constructor" << std::endl
+          << "The size of MeshBlock must be divisible by 2 in order to use SMR or AMR."
+          << std::endl;
+      PARTHENON_FAIL(msg);
+    }
+  }
+}
+
+void Mesh::DoStaticRefinement(ParameterInput *pin) {
+  std::stringstream msg;
+
+  // TODO(LFR): Static refinement currently only works for hyper-rectangular meshes
+  std::array<int, 3> nrbx;
+  for (auto dir : {X1DIR, X2DIR, X3DIR})
+    nrbx[dir - 1] = mesh_size.nx(dir) / base_block_size.nx(dir);
+
+  auto GetStaticRefLLIndexRange = [](CoordinateDirection dir, int num_root_block,
+                                     int ref_level, const RegionSize &ref_size,
+                                     const RegionSize &mesh_size) {
+    int lxtot = num_root_block * (1 << ref_level);
+    int lxmin, lxmax;
+    for (lxmin = 0; lxmin < lxtot; lxmin++) {
+      Real r = LogicalLocation::IndexToSymmetrizedCoordinate(lxmin + 1,
+                                                             BlockLocation::Left, lxtot);
+      if (mesh_size.SymmetrizedLogicalToActualPosition(r, dir) > ref_size.xmin(dir))
+        break;
+    }
+    for (lxmax = lxmin; lxmax < lxtot; lxmax++) {
+      Real r = LogicalLocation::IndexToSymmetrizedCoordinate(lxmax + 1,
+                                                             BlockLocation::Left, lxtot);
+      if (mesh_size.SymmetrizedLogicalToActualPosition(r, dir) >= ref_size.xmax(dir))
+        break;
+    }
+    if (lxmin % 2 == 1) lxmin--;
+    if (lxmax % 2 == 0) lxmax++;
+    return std::pair<int, int>{lxmin, lxmax};
+  };
+
+  InputBlock *pib = pin->pfirst_block;
+  while (pib != nullptr) {
+    if (pib->block_name.compare(0, 27, "parthenon/static_refinement") == 0) {
+      RegionSize ref_size;
+      ref_size.xmin(X1DIR) = pin->GetReal(pib->block_name, "x1min");
+      ref_size.xmax(X1DIR) = pin->GetReal(pib->block_name, "x1max");
+      if (ndim >= 2) {
+        ref_size.xmin(X2DIR) = pin->GetReal(pib->block_name, "x2min");
+        ref_size.xmax(X2DIR) = pin->GetReal(pib->block_name, "x2max");
+      } else {
+        ref_size.xmin(X2DIR) = mesh_size.xmin(X2DIR);
+        ref_size.xmax(X2DIR) = mesh_size.xmax(X2DIR);
+      }
+      if (ndim == 3) {
+        ref_size.xmin(X3DIR) = pin->GetReal(pib->block_name, "x3min");
+        ref_size.xmax(X3DIR) = pin->GetReal(pib->block_name, "x3max");
+      } else {
+        ref_size.xmin(X3DIR) = mesh_size.xmin(X3DIR);
+        ref_size.xmax(X3DIR) = mesh_size.xmax(X3DIR);
+      }
+      int ref_lev = pin->GetInteger(pib->block_name, "level");
+      int lrlev = ref_lev + GetLegacyTreeRootLevel();
+      // range check
+      if (ref_lev < 1) {
+        msg << "### FATAL ERROR in Mesh constructor" << std::endl
+            << "Refinement level must be larger than 0 (root level = 0)" << std::endl;
+        PARTHENON_FAIL(msg);
+      }
+      if (lrlev > max_level) {
+        msg << "### FATAL ERROR in Mesh constructor" << std::endl
+            << "Refinement level exceeds the maximum level (specify "
+            << "'maxlevel' parameter in <parthenon/mesh> input block if adaptive)."
+            << std::endl;
+
+        PARTHENON_FAIL(msg);
+      }
+      if (ref_size.xmin(X1DIR) > ref_size.xmax(X1DIR) ||
+          ref_size.xmin(X2DIR) > ref_size.xmax(X2DIR) ||
+          ref_size.xmin(X3DIR) > ref_size.xmax(X3DIR)) {
+        msg << "### FATAL ERROR in Mesh constructor" << std::endl
+            << "Invalid refinement region is specified." << std::endl;
+        PARTHENON_FAIL(msg);
+      }
+      if (ref_size.xmin(X1DIR) < mesh_size.xmin(X1DIR) ||
+          ref_size.xmax(X1DIR) > mesh_size.xmax(X1DIR) ||
+          ref_size.xmin(X2DIR) < mesh_size.xmin(X2DIR) ||
+          ref_size.xmax(X2DIR) > mesh_size.xmax(X2DIR) ||
+          ref_size.xmin(X3DIR) < mesh_size.xmin(X3DIR) ||
+          ref_size.xmax(X3DIR) > mesh_size.xmax(X3DIR)) {
+        msg << "### FATAL ERROR in Mesh constructor" << std::endl
+            << "Refinement region must be smaller than the whole mesh." << std::endl;
+        PARTHENON_FAIL(msg);
+      }
+      std::int64_t l_region_min[3]{0, 0, 0};
+      std::int64_t l_region_max[3]{1, 1, 1};
+      for (auto dir : {X1DIR, X2DIR, X3DIR}) {
+        if (!mesh_size.symmetry(dir)) {
+          auto [lmin, lmax] =
+              GetStaticRefLLIndexRange(dir, nrbx[dir - 1], ref_lev, ref_size, mesh_size);
+          l_region_min[dir - 1] = lmin;
+          l_region_max[dir - 1] = lmax;
+        }
+      }
+      for (std::int64_t k = l_region_min[2]; k < l_region_max[2]; k += 2) {
+        for (std::int64_t j = l_region_min[1]; j < l_region_max[1]; j += 2) {
+          for (std::int64_t i = l_region_min[0]; i < l_region_max[0]; i += 2) {
+            LogicalLocation nloc(lrlev, i, j, k);
+            forest.AddMeshBlock(forest.GetForestLocationFromLegacyTreeLocation(nloc));
+          }
+        }
+      }
+    }
+    pib = pib->pnext;
+  }
+}
+// Return list of locations and levels for the legacy tree
+// TODO(LFR): It doesn't make sense to offset the level by the
+//   legacy tree root level since the location indices are defined
+//   for loc.level(). It seems this level offset is required for
+//   the output to agree with the legacy output though.
+std::pair<std::vector<std::int64_t>, std::vector<std::int64_t>>
+Mesh::GetLevelsAndLogicalLocationsFlat() const noexcept {
+  std::vector<std::int64_t> levels, logicalLocations;
+  levels.reserve(nbtotal);
+  logicalLocations.reserve(nbtotal * 3);
+  for (auto loc : loclist) {
+    loc = forest.GetLegacyTreeLocation(loc);
+    levels.push_back(loc.level() - GetLegacyTreeRootLevel());
+    logicalLocations.push_back(loc.lx1());
+    logicalLocations.push_back(loc.lx2());
+    logicalLocations.push_back(loc.lx3());
+  }
+  return std::make_pair(levels, logicalLocations);
 }
 
 } // namespace parthenon

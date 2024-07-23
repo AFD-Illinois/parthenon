@@ -3,7 +3,7 @@
 // Copyright(C) 2020 The Parthenon collaboration
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2020-2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -23,10 +23,11 @@
 #include <vector>
 
 #include "basic_types.hpp"
-#include "bvals/bvals_interfaces.hpp"
+#include "bvals/neighbor_block.hpp"
 #include "coordinates/coordinates.hpp"
 #include "interface/variable_state.hpp"
 #include "mesh/domain.hpp"
+#include "mesh/forest/logical_coordinate_transformation.hpp"
 #include "utils/communication_buffer.hpp"
 #include "utils/indexer.hpp"
 #include "utils/object_pool.hpp"
@@ -40,20 +41,35 @@ class NeighborBlock;
 template <typename T>
 class Variable;
 
+enum class IndexRangeType {
+  BoundaryInteriorSend,
+  BoundaryExteriorRecv,
+  InteriorSend,
+  InteriorRecv
+};
+
 struct BndInfo {
   int ntopological_elements = 1;
+  using TE = TopologicalElement;
+  TE topo_idx[3]{TE::CC, TE::CC, TE::CC};
   SpatiallyMaskedIndexer6D idxer[3];
+  forest::LogicalCoordinateTransformation lcoord_trans;
 
-  CoordinateDirection dir;
+  CoordinateDirection dir{CoordinateDirection::X0DIR};
   bool allocated = true;
   bool buf_allocated = true;
+  int alloc_status;
 
   buf_pool_t<Real>::weak_t buf;        // comm buffer from pool
   ParArrayND<Real, VariableState> var; // data variable used for comms
   Coordinates_t coords;
 
+  KOKKOS_DEFAULTED_FUNCTION
   BndInfo() = default;
+  KOKKOS_DEFAULTED_FUNCTION
   BndInfo(const BndInfo &) = default;
+  BndInfo(MeshBlock *pmb, const NeighborBlock &nb, std::shared_ptr<Variable<Real>> v,
+          CommBuffer<buf_pool_t<Real>::owner_t> *combuf, IndexRangeType idx_range_type);
 
   // These are are used to generate the BndInfo struct for various
   // kinds of boundary types and operations.
@@ -63,30 +79,34 @@ struct BndInfo {
   static BndInfo GetSetBndInfo(MeshBlock *pmb, const NeighborBlock &nb,
                                std::shared_ptr<Variable<Real>> v,
                                CommBuffer<buf_pool_t<Real>::owner_t> *buf);
-  static BndInfo GetSendCCFluxCor(MeshBlock *pmb, const NeighborBlock &nb,
-                                  std::shared_ptr<Variable<Real>> v,
-                                  CommBuffer<buf_pool_t<Real>::owner_t> *buf);
-  static BndInfo GetSetCCFluxCor(MeshBlock *pmb, const NeighborBlock &nb,
-                                 std::shared_ptr<Variable<Real>> v,
-                                 CommBuffer<buf_pool_t<Real>::owner_t> *buf);
 };
 
 struct ProResInfo {
   int ntopological_elements = 1;
   // Has to be large enough to allow for maximum integer
   // conversion of TopologicalElements
+  bool include_el[10]{false, false, false, false, false,
+                      false, false, false, false, false};
+  KOKKOS_FORCEINLINE_FUNCTION
+  bool &IncludeTopoEl(TopologicalElement te) { return include_el[static_cast<int>(te)]; }
+  KOKKOS_FORCEINLINE_FUNCTION
+  bool IncludeTopoEl(TopologicalElement te) const {
+    return include_el[static_cast<int>(te)];
+  }
   SpatiallyMaskedIndexer6D idxer[10];
 
-  CoordinateDirection dir;
+  CoordinateDirection dir{CoordinateDirection::X0DIR};
   bool allocated = true;
+  int alloc_status;
   RefinementOp_t refinement_op = RefinementOp_t::None;
   Coordinates_t coords, coarse_coords; // coords
 
   ParArrayND<Real, VariableState> fine, coarse;
-
+  KOKKOS_DEFAULTED_FUNCTION
   ProResInfo() = default;
+  KOKKOS_DEFAULTED_FUNCTION
   ProResInfo(const ProResInfo &) = default;
-
+  ProResInfo(MeshBlock *pmb, const NeighborBlock &nb, std::shared_ptr<Variable<Real>> v);
   // These are are used to generate the BndInfo struct for various
   // kinds of boundary types and operations.
   static ProResInfo GetNull(MeshBlock *pmb, const NeighborBlock &nb,

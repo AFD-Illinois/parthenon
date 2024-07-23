@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2021. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -64,10 +64,11 @@ TaskCollection StochasticSubgridDriver::MakeTaskCollection(BlockList_t &blocks,
 
   // sample number of iterations task
   {
-    const int num_partitions = pmesh->DefaultNumPartitions();
+    auto partitions = pmesh->GetDefaultBlockPartitions();
+    const int num_partitions = partitions.size();
     TaskRegion &async_region = tc.AddRegion(num_partitions);
     for (int i = 0; i < num_partitions; i++) {
-      auto &md = pmesh->mesh_data.GetOrAdd("base", i);
+      auto &md = pmesh->mesh_data.Add("base", partitions[i]);
       async_region[i].AddTask(none, ComputeNumIter, md, pmesh->packages);
     }
   }
@@ -114,26 +115,25 @@ TaskCollection StochasticSubgridDriver::MakeTaskCollection(BlockList_t &blocks,
   {
     const Real beta = integrator->beta[stage - 1];
     const Real dt = integrator->dt;
-    const int num_partitions = pmesh->DefaultNumPartitions();
+    auto partitions = pmesh->GetDefaultBlockPartitions();
+    const int num_partitions = partitions.size();
 
     // note that task within this region that contains one tasklist per pack
     // could still be executed in parallel
     TaskRegion &single_tasklist_per_pack_region = tc.AddRegion(num_partitions);
     for (int i = 0; i < num_partitions; i++) {
       auto &tl = single_tasklist_per_pack_region[i];
-      auto &mbase = pmesh->mesh_data.GetOrAdd("base", i);
-      auto &mc0 = pmesh->mesh_data.GetOrAdd(stage_name[stage - 1], i);
-      auto &mc1 = pmesh->mesh_data.GetOrAdd(stage_name[stage], i);
-      auto &mdudt = pmesh->mesh_data.GetOrAdd("dUdt", i);
+      auto &mbase = pmesh->mesh_data.Add("base", partitions[i]);
+      auto &mc0 = pmesh->mesh_data.Add(stage_name[stage - 1], mbase);
+      auto &mc1 = pmesh->mesh_data.Add(stage_name[stage], mbase);
+      auto &mdudt = pmesh->mesh_data.Add("dUdt", mbase);
 
       const auto any = parthenon::BoundaryType::any;
 
       tl.AddTask(none, parthenon::StartReceiveBoundBufs<any>, mc1);
       tl.AddTask(none, parthenon::StartReceiveFluxCorrections, mc0);
 
-      auto send_flx = tl.AddTask(none, parthenon::LoadAndSendFluxCorrections, mc0);
-      auto recv_flx = tl.AddTask(none, parthenon::ReceiveFluxCorrections, mc0);
-      auto set_flx = tl.AddTask(recv_flx, parthenon::SetFluxCorrections, mc0);
+      auto set_flx = parthenon::AddFluxCorrectionTasks(none, tl, mc0, pmesh->multilevel);
 
       // compute the divergence of fluxes of conserved variables
       auto flux_div =

@@ -3,7 +3,7 @@
 // Copyright(C) 2023 The Parthenon collaboration
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2023-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -257,10 +257,8 @@ void Histogram::CalcHist(Mesh *pm) {
   // https://github.com/kokkos/kokkos/issues/6363
   Kokkos::deep_copy(result, 0);
 
-  const int num_partitions = pm->DefaultNumPartitions();
-
-  for (int p = 0; p < num_partitions; p++) {
-    auto &md = pm->mesh_data.GetOrAdd("base", p);
+  for (auto partition : pm->GetDefaultBlockPartitions()) {
+    auto &md = pm->mesh_data.Add("base", partition);
 
     const auto x_var_pack_string = x_var_type == VarType::Var
                                        ? std::vector<std::string>{x_var_name_}
@@ -287,8 +285,7 @@ void Histogram::CalcHist(Mesh *pm) {
     const auto kb = md->GetBoundsK(IndexDomain::interior);
 
     parthenon::par_for(
-        DEFAULT_LOOP_PATTERN, "CalcHist", DevExecSpace(), 0, md->NumBlocks() - 1, kb.s,
-        kb.e, jb.s, jb.e, ib.s, ib.e,
+        "CalcHist", 0, md->NumBlocks() - 1, kb.s, kb.e, jb.s, jb.e, ib.s, ib.e,
         KOKKOS_LAMBDA(const int b, const int k, const int j, const int i) {
           auto &coords = x_var.GetCoords(b);
           auto x_val = std::numeric_limits<Real>::quiet_NaN();
@@ -472,12 +469,13 @@ void HistogramOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin, SimTime *tm
     using namespace HDF5;
     H5P const pl_xfer = H5P::FromHIDCheck(H5Pcreate(H5P_DATASET_XFER));
 
-    // As we're reusing the interface from the existing hdf5 output, we have to define
-    // everything as 7D arrays.
-    // Counts will be set for each histogram individually below.
-    const std::array<hsize_t, H5_NDIM> local_offset({0, 0, 0, 0, 0, 0, 0});
-    std::array<hsize_t, H5_NDIM> local_count({0, 0, 0, 0, 0, 0, 0});
-    std::array<hsize_t, H5_NDIM> global_count({0, 0, 0, 0, 0, 0, 0});
+    // As we're reusing the interface from the existing hdf5 output,
+    // we have to define everything as H5_NDIM arrays. Counts will be
+    // set for each histogram individually below. All
+    // zero-initialized
+    const std::array<hsize_t, H5_NDIM> local_offset = {0};
+    std::array<hsize_t, H5_NDIM> local_count = {0};
+    std::array<hsize_t, H5_NDIM> global_count = {0};
 
     // create/open HDF5 file
     const std::string filename = GenerateFilename_(pin, tm, signal);

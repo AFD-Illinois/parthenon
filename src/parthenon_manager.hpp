@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2020-2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2020-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -25,6 +25,7 @@
 #include "interface/state_descriptor.hpp"
 #include "interface/swarm.hpp"
 #include "mesh/domain.hpp"
+#include "mesh/forest/forest_topology.hpp"
 #include "mesh/mesh.hpp"
 #include "outputs/restart.hpp"
 #include "parameter_input.hpp"
@@ -38,7 +39,8 @@ class ParthenonManager {
  public:
   ParthenonManager() { app_input.reset(new ApplicationInput()); }
   ParthenonStatus ParthenonInitEnv(int argc, char *argv[]);
-  void ParthenonInitPackagesAndMesh();
+  void
+  ParthenonInitPackagesAndMesh(std::optional<forest::ForestDefinition> forest_def = {});
   ParthenonStatus ParthenonFinalize();
 
   bool IsRestart() { return (arg.restart_filename == nullptr ? false : true); }
@@ -94,7 +96,7 @@ class ParthenonManager {
                 for (auto &pmb : block_list) {
                   // 1 deep copy per tensor component per swarmvar per
                   // block, unfortunately. But only at initialization.
-                  auto swarm_container = pmb->swarm_data.Get();
+                  auto swarm_container = pmb->meshblock_data.Get()->GetSwarmData();
                   auto pswarm_blk = swarm_container->Get(swarmname);
                   auto v = Kokkos::subview(pswarm_blk->Get<T>(varname).data, n6, n5, n4,
                                            n3, n2, Kokkos::ALL());

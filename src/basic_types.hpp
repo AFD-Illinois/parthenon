@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2021-2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2021-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -15,6 +15,7 @@
 
 #include <limits>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -37,6 +38,16 @@ using Real = double;
 #endif
 #endif
 
+struct IndexRange {
+  int s = 0; /// Starting Index (inclusive)
+  int e = 0; /// Ending Index (inclusive)
+};
+
+// Enum speficying whether or not you requested a flux variable in
+// GetVariablesByFlag type methods
+// TODO(JMM): Is this the right place for this?
+enum class FluxRequest { NoFlux, OnlyFlux, Any };
+
 // needed for arrays dimensioned over grid directions
 // enumerator type only used in Mesh::EnrollUserMeshGenerator()
 // X0DIR time-like direction
@@ -45,11 +56,11 @@ using Real = double;
 // X3DIR z, phi, etc...
 enum CoordinateDirection { NODIR = -1, X0DIR = 0, X1DIR = 1, X2DIR = 2, X3DIR = 3 };
 enum class BlockLocation { Left = 0, Center = 1, Right = 2 };
-enum class TaskStatus { fail, complete, incomplete, iterate, skip, waiting };
+enum class TaskStatus { complete, incomplete, iterate, fail };
 
 enum class AmrTag : int { derefine = -1, same = 0, refine = 1 };
 enum class RefinementOp_t { Prolongation, Restriction, None };
-
+enum class CellLevel : int { coarse = -1, same = 0, fine = 1 };
 // JMM: Not clear this is the best place for this but it minimizes
 // circular dependency nonsense.
 constexpr int NUM_BNDRY_TYPES = 10;
@@ -65,6 +76,22 @@ enum class BoundaryType : int {
   gmg_prolongate_send,
   gmg_prolongate_recv
 };
+
+enum class GridType : int { none, leaf, two_level_composite, single_level_with_internal };
+struct GridIdentifier {
+  GridType type = GridType::none;
+  int logical_level = 0;
+
+  static GridIdentifier leaf() { return GridIdentifier{GridType::leaf, 0}; }
+  static GridIdentifier two_level_composite(int level) {
+    return GridIdentifier{GridType::two_level_composite, level};
+  }
+};
+// Add a comparator so we can store in std::map
+inline bool operator<(const GridIdentifier &lhs, const GridIdentifier &rhs) {
+  if (lhs.type != rhs.type) return lhs.type < rhs.type;
+  return lhs.logical_level < rhs.logical_level;
+}
 
 constexpr bool IsSender(BoundaryType btype) {
   if (btype == BoundaryType::flxcor_recv) return false;
@@ -130,7 +157,7 @@ enum class TopologicalElement : std::size_t {
 enum class TopologicalType { Cell, Face, Edge, Node };
 
 KOKKOS_FORCEINLINE_FUNCTION
-TopologicalType GetTopologicalType(TopologicalElement el) {
+constexpr TopologicalType GetTopologicalType(TopologicalElement el) {
   using TE = TopologicalElement;
   using TT = TopologicalType;
   if (el == TE::CC) {
@@ -152,16 +179,17 @@ inline std::vector<TopologicalElement> GetTopologicalElements(TopologicalType tt
   if (tt == TT::Face) return {TE::F1, TE::F2, TE::F3};
   return {TE::CC};
 }
+
 using TE = TopologicalElement;
 // Returns one if the I coordinate of el is offset from the zone center coordinates,
 // and zero otherwise
-KOKKOS_INLINE_FUNCTION int TopologicalOffsetI(TE el) noexcept {
+inline constexpr int TopologicalOffsetI(TE el) {
   return (el == TE::F1 || el == TE::E2 || el == TE::E3 || el == TE::NN);
 }
-KOKKOS_INLINE_FUNCTION int TopologicalOffsetJ(TE el) noexcept {
+inline constexpr int TopologicalOffsetJ(TE el) {
   return (el == TE::F2 || el == TE::E3 || el == TE::E1 || el == TE::NN);
 }
-KOKKOS_INLINE_FUNCTION int TopologicalOffsetK(TE el) noexcept {
+inline constexpr int TopologicalOffsetK(TE el) {
   return (el == TE::F3 || el == TE::E2 || el == TE::E1 || el == TE::NN);
 }
 
@@ -207,6 +235,8 @@ struct SimTime {
 template <typename T>
 using Dictionary = std::unordered_map<std::string, T>;
 
+template <typename T>
+using Triple_t = std::tuple<T, T, T>;
 } // namespace parthenon
 
 #endif // BASIC_TYPES_HPP_

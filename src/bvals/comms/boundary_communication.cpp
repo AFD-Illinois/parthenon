@@ -3,7 +3,7 @@
 // Copyright(C) 2022 The Parthenon collaboration
 // Licensed under the 3-clause BSD License, see LICENSE file for details
 //========================================================================================
-// (C) (or copyright) 2022-2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2022-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -30,12 +30,13 @@
 #include "globals.hpp"
 #include "interface/variable.hpp"
 #include "kokkos_abstraction.hpp"
+#include "mesh/forest/logical_coordinate_transformation.hpp"
 #include "mesh/mesh.hpp"
 #include "mesh/mesh_refinement.hpp"
 #include "mesh/meshblock.hpp"
 #include "prolong_restrict/prolong_restrict.hpp"
-#include "tasks/task_id.hpp"
-#include "tasks/task_list.hpp"
+
+#include "tasks/tasks.hpp"
 #include "utils/error_checking.hpp"
 #include "utils/loop_utils.hpp"
 
@@ -46,7 +47,7 @@ using namespace loops::shorthands;
 
 template <BoundaryType bound_type>
 TaskStatus SendBoundBufs(std::shared_ptr<MeshData<Real>> &md) {
-  Kokkos::Profiling::pushRegion("Task_LoadAndSendBoundBufs");
+  PARTHENON_INSTRUMENT
 
   Mesh *pmesh = md->GetMeshPointer();
   auto &cache = md->GetBvarsCache().GetSubCache(bound_type, true);
@@ -59,11 +60,9 @@ TaskStatus SendBoundBufs(std::shared_ptr<MeshData<Real>> &md) {
       CheckSendBufferCacheForRebuild<bound_type, true>(md);
 
   if (nbound == 0) {
-    Kokkos::Profiling::popRegion(); // Task_LoadAndSendBoundBufs
     return TaskStatus::complete;
   }
   if (other_communication_unfinished) {
-    Kokkos::Profiling::popRegion(); // Task_LoadAndSendBoundBufs
     return TaskStatus::incomplete;
   }
 
@@ -92,7 +91,7 @@ TaskStatus SendBoundBufs(std::shared_ptr<MeshData<Real>> &md) {
   auto &sending_nonzero_flags_h = cache.sending_non_zero_flags_h;
 
   Kokkos::parallel_for(
-      "SendBoundBufs",
+      PARTHENON_AUTO_LABEL,
       Kokkos::TeamPolicy<>(parthenon::DevExecSpace(), nbound, Kokkos::AUTO),
       KOKKOS_LAMBDA(parthenon::team_mbr_t team_member) {
         const int b = team_member.league_rank();
@@ -105,8 +104,9 @@ TaskStatus SendBoundBufs(std::shared_ptr<MeshData<Real>> &md) {
         Real threshold = bnd_info(b).var.allocation_threshold;
         bool non_zero[3]{false, false, false};
         int idx_offset = 0;
-        for (int iel = 0; iel < bnd_info(b).ntopological_elements; ++iel) {
-          auto &idxer = bnd_info(b).idxer[iel];
+        for (int it = 0; it < bnd_info(b).ntopological_elements; ++it) {
+          auto &idxer = bnd_info(b).idxer[it];
+          const int iel = static_cast<int>(bnd_info(b).topo_idx[it]) % 3;
           const int Ni = idxer.template EndIdx<5>() - idxer.template StartIdx<5>() + 1;
           Kokkos::parallel_reduce(
               Kokkos::TeamThreadRange<>(team_member, idxer.size() / Ni),
@@ -127,6 +127,7 @@ TaskStatus SendBoundBufs(std::shared_ptr<MeshData<Real>> &md) {
                     Kokkos::LOr<bool, parthenon::DevMemSpace>(mnon_zero));
 
                 lnon_zero = lnon_zero || mnon_zero;
+                if (bound_type == BoundaryType::flxcor_send) lnon_zero = true;
               },
               Kokkos::LOr<bool, parthenon::DevMemSpace>(non_zero[iel]));
           idx_offset += idxer.size();
@@ -152,7 +153,6 @@ TaskStatus SendBoundBufs(std::shared_ptr<MeshData<Real>> &md) {
       buf.SendNull();
   }
 
-  Kokkos::Profiling::popRegion(); // Task_LoadAndSendBoundBufs
   return TaskStatus::complete;
 }
 
@@ -164,10 +164,12 @@ template TaskStatus
 SendBoundBufs<BoundaryType::gmg_restrict_send>(std::shared_ptr<MeshData<Real>> &);
 template TaskStatus
 SendBoundBufs<BoundaryType::gmg_prolongate_send>(std::shared_ptr<MeshData<Real>> &);
+template TaskStatus
+SendBoundBufs<BoundaryType::flxcor_send>(std::shared_ptr<MeshData<Real>> &);
 
 template <BoundaryType bound_type>
 TaskStatus StartReceiveBoundBufs(std::shared_ptr<MeshData<Real>> &md) {
-  Kokkos::Profiling::pushRegion("Task_StartReceiveBoundBufs");
+  PARTHENON_INSTRUMENT
   Mesh *pmesh = md->GetMeshPointer();
   auto &cache = md->GetBvarsCache().GetSubCache(bound_type, false);
   if (cache.buf_vec.size() == 0)
@@ -177,7 +179,6 @@ TaskStatus StartReceiveBoundBufs(std::shared_ptr<MeshData<Real>> &md) {
   std::for_each(std::begin(cache.buf_vec), std::end(cache.buf_vec),
                 [](auto pbuf) { pbuf->TryStartReceive(); });
 
-  Kokkos::Profiling::popRegion(); // Task_StartReceiveBoundBufs
   return TaskStatus::complete;
 }
 
@@ -191,10 +192,12 @@ template TaskStatus
 StartReceiveBoundBufs<BoundaryType::gmg_restrict_recv>(std::shared_ptr<MeshData<Real>> &);
 template TaskStatus StartReceiveBoundBufs<BoundaryType::gmg_prolongate_recv>(
     std::shared_ptr<MeshData<Real>> &);
+template TaskStatus
+StartReceiveBoundBufs<BoundaryType::flxcor_recv>(std::shared_ptr<MeshData<Real>> &);
 
 template <BoundaryType bound_type>
 TaskStatus ReceiveBoundBufs(std::shared_ptr<MeshData<Real>> &md) {
-  Kokkos::Profiling::pushRegion("Task_ReceiveBoundBufs");
+  PARTHENON_INSTRUMENT
 
   Mesh *pmesh = md->GetMeshPointer();
   auto &cache = md->GetBvarsCache().GetSubCache(bound_type, false);
@@ -225,7 +228,6 @@ TaskStatus ReceiveBoundBufs(std::shared_ptr<MeshData<Real>> &md) {
           ++ibound;
         });
   }
-  Kokkos::Profiling::popRegion(); // Task_ReceiveBoundBufs
   if (all_received) return TaskStatus::complete;
   return TaskStatus::incomplete;
 }
@@ -240,10 +242,12 @@ template TaskStatus
 ReceiveBoundBufs<BoundaryType::gmg_restrict_recv>(std::shared_ptr<MeshData<Real>> &);
 template TaskStatus
 ReceiveBoundBufs<BoundaryType::gmg_prolongate_recv>(std::shared_ptr<MeshData<Real>> &);
+template TaskStatus
+ReceiveBoundBufs<BoundaryType::flxcor_recv>(std::shared_ptr<MeshData<Real>> &);
 
 template <BoundaryType bound_type>
 TaskStatus SetBounds(std::shared_ptr<MeshData<Real>> &md) {
-  Kokkos::Profiling::pushRegion("Task_SetInternalBoundaries");
+  PARTHENON_INSTRUMENT
 
   Mesh *pmesh = md->GetMeshPointer();
   auto &cache = md->GetBvarsCache().GetSubCache(bound_type, false);
@@ -265,47 +269,61 @@ TaskStatus SetBounds(std::shared_ptr<MeshData<Real>> &md) {
   // const Real threshold = Globals::sparse_config.allocation_threshold;
   auto &bnd_info = cache.bnd_info;
   Kokkos::parallel_for(
-      "SetBoundaryBuffers",
+      PARTHENON_AUTO_LABEL,
       Kokkos::TeamPolicy<>(parthenon::DevExecSpace(), nbound, Kokkos::AUTO),
       KOKKOS_LAMBDA(parthenon::team_mbr_t team_member) {
         const int b = team_member.league_rank();
         int idx_offset = 0;
-        for (int iel = 0; iel < bnd_info(b).ntopological_elements; ++iel) {
-          auto &idxer = bnd_info(b).idxer[iel];
+        for (int it = 0; it < bnd_info(b).ntopological_elements; ++it) {
+          auto &idxer = bnd_info(b).idxer[it];
+          auto &lcoord_trans = bnd_info(b).lcoord_trans;
+          auto &var = bnd_info(b).var;
+          const auto [tel, ftemp] =
+              lcoord_trans.InverseTransform(bnd_info(b).topo_idx[it]);
+          Real fac = ftemp; // Can't capture structured bindings
+          const int iel = static_cast<int>(tel) % 3;
           const int Ni = idxer.template EndIdx<5>() - idxer.template StartIdx<5>() + 1;
           if (bnd_info(b).buf_allocated && bnd_info(b).allocated) {
             Kokkos::parallel_for(
                 Kokkos::TeamThreadRange<>(team_member, idxer.size() / Ni),
                 [&](const int idx) {
-                  const auto [t, u, v, k, j, i] = idxer(idx * Ni);
-                  Real *var = &bnd_info(b).var(iel, t, u, v, k, j, i);
                   Real *buf = &bnd_info(b).buf(idx * Ni + idx_offset);
+                  const auto [t, u, v, k, j, i] = idxer(idx * Ni);
                   // Have to do this because of some weird issue about structure bindings
                   // being captured
+                  const int tt = t;
+                  const int uu = u;
+                  const int vv = v;
                   const int kk = k;
                   const int jj = j;
                   const int ii = i;
-                  Kokkos::parallel_for(Kokkos::ThreadVectorRange<>(team_member, Ni),
-                                       [&](int m) {
-                                         if (idxer.IsActive(kk, jj, ii + m))
-                                           var[m] = buf[m];
-                                       });
+                  Kokkos::parallel_for(
+                      Kokkos::ThreadVectorRange<>(team_member, Ni), [&](int m) {
+                        const auto [il, jl, kl] =
+                            lcoord_trans.InverseTransform({ii + m, jj, kk});
+                        if (idxer.IsActive(kl, jl, il))
+                          var(iel, tt, uu, vv, kl, jl, il) = fac * buf[m];
+                      });
                 });
-          } else if (bnd_info(b).allocated) {
+          } else if (bnd_info(b).allocated && bound_type != BoundaryType::flxcor_recv) {
             const Real default_val = bnd_info(b).var.sparse_default_val;
             Kokkos::parallel_for(
                 Kokkos::TeamThreadRange<>(team_member, idxer.size() / Ni),
                 [&](const int idx) {
                   const auto [t, u, v, k, j, i] = idxer(idx * Ni);
-                  Real *var = &bnd_info(b).var(iel, t, u, v, k, j, i);
+                  const int tt = t;
+                  const int uu = u;
+                  const int vv = v;
                   const int kk = k;
                   const int jj = j;
                   const int ii = i;
-                  Kokkos::parallel_for(Kokkos::ThreadVectorRange<>(team_member, Ni),
-                                       [&](int m) {
-                                         if (idxer.IsActive(kk, jj, ii + m))
-                                           var[m] = default_val;
-                                       });
+                  Kokkos::parallel_for(
+                      Kokkos::ThreadVectorRange<>(team_member, Ni), [&](int m) {
+                        const auto [il, jl, kl] =
+                            lcoord_trans.InverseTransform({ii + m, jj, kk});
+                        if (idxer.IsActive(kl, jl, il))
+                          var(iel, tt, uu, vv, kl, jl, il) = default_val;
+                      });
                 });
           }
           idx_offset += idxer.size();
@@ -323,7 +341,6 @@ TaskStatus SetBounds(std::shared_ptr<MeshData<Real>> &md) {
     refinement::Restrict(resolved_packages, cache.prores_cache, pmb->cellbounds,
                          pmb->c_cellbounds);
   }
-  Kokkos::Profiling::popRegion(); // Task_SetInternalBoundaries
   return TaskStatus::complete;
 }
 
@@ -334,10 +351,12 @@ template TaskStatus
 SetBounds<BoundaryType::gmg_restrict_recv>(std::shared_ptr<MeshData<Real>> &);
 template TaskStatus
 SetBounds<BoundaryType::gmg_prolongate_recv>(std::shared_ptr<MeshData<Real>> &);
+template TaskStatus
+SetBounds<BoundaryType::flxcor_recv>(std::shared_ptr<MeshData<Real>> &);
 
 template <BoundaryType bound_type>
 TaskStatus ProlongateBounds(std::shared_ptr<MeshData<Real>> &md) {
-  Kokkos::Profiling::pushRegion("Task_ProlongateBoundaries");
+  PARTHENON_INSTRUMENT
 
   Mesh *pmesh = md->GetMeshPointer();
   auto &cache = md->GetBvarsCache().GetSubCache(bound_type, false);
@@ -367,7 +386,6 @@ TaskStatus ProlongateBounds(std::shared_ptr<MeshData<Real>> &md) {
     refinement::ProlongateInternal(resolved_packages, cache.prores_cache, pmb->cellbounds,
                                    pmb->c_cellbounds);
   }
-  Kokkos::Profiling::popRegion(); // Task_ProlongateBoundaries
   return TaskStatus::complete;
 }
 
@@ -381,8 +399,8 @@ template TaskStatus
 ProlongateBounds<BoundaryType::gmg_prolongate_recv>(std::shared_ptr<MeshData<Real>> &);
 
 // Adds all relevant boundary communication to a single task list
-template <BoundaryType bounds, class TL_t>
-TaskID AddBoundaryExchangeTasks(TaskID dependency, TL_t &tl,
+template <BoundaryType bounds>
+TaskID AddBoundaryExchangeTasks(TaskID dependency, TaskList &tl,
                                 std::shared_ptr<MeshData<Real>> &md, bool multilevel) {
   // TODO(LFR): Splitting up the boundary tasks while doing prolongation can cause some
   //            possible issues for sparse fields. In particular, the order in which
@@ -409,26 +427,33 @@ TaskID AddBoundaryExchangeTasks(TaskID dependency, TL_t &tl,
 
   // auto out = (pro_local | pro);
 
-  auto send = tl.AddTask(dependency, SendBoundBufs<bounds>, md);
-  auto recv = tl.AddTask(dependency, ReceiveBoundBufs<bounds>, md);
-  auto set = tl.AddTask(recv, SetBounds<bounds>, md);
+  auto send = tl.AddTask(dependency, TF(SendBoundBufs<bounds>), md);
+  auto recv = tl.AddTask(dependency, TF(ReceiveBoundBufs<bounds>), md);
+  auto set = tl.AddTask(recv, TF(SetBounds<bounds>), md);
 
   auto pro = set;
   if (md->GetMeshPointer()->multilevel) {
-    auto cbound = tl.AddTask(set, ApplyBoundaryConditionsOnCoarseOrFineMD, md, true);
-    pro = tl.AddTask(cbound, ProlongateBounds<bounds>, md);
+    auto cbound = tl.AddTask(set, TF(ApplyBoundaryConditionsOnCoarseOrFineMD), md, true);
+    pro = tl.AddTask(cbound, TF(ProlongateBounds<bounds>), md);
   }
-  auto fbound = tl.AddTask(pro, ApplyBoundaryConditionsOnCoarseOrFineMD, md, false);
+  auto fbound = tl.AddTask(pro, TF(ApplyBoundaryConditionsOnCoarseOrFineMD), md, false);
 
   return fbound;
 }
-template TaskID AddBoundaryExchangeTasks<BoundaryType::any, TaskList>(
-    TaskID, TaskList &, std::shared_ptr<MeshData<Real>> &, bool);
-template TaskID AddBoundaryExchangeTasks<BoundaryType::any, IterativeTasks>(
-    TaskID, IterativeTasks &, std::shared_ptr<MeshData<Real>> &, bool);
+template TaskID
+AddBoundaryExchangeTasks<BoundaryType::any>(TaskID, TaskList &,
+                                            std::shared_ptr<MeshData<Real>> &, bool);
 
-template TaskID AddBoundaryExchangeTasks<BoundaryType::gmg_same, TaskList>(
-    TaskID, TaskList &, std::shared_ptr<MeshData<Real>> &, bool);
-template TaskID AddBoundaryExchangeTasks<BoundaryType::gmg_same, IterativeTasks>(
-    TaskID, IterativeTasks &, std::shared_ptr<MeshData<Real>> &, bool);
+template TaskID
+AddBoundaryExchangeTasks<BoundaryType::gmg_same>(TaskID, TaskList &,
+                                                 std::shared_ptr<MeshData<Real>> &, bool);
+
+TaskID AddFluxCorrectionTasks(TaskID dependency, TaskList &tl,
+                              std::shared_ptr<MeshData<Real>> &md, bool multilevel) {
+  if (!multilevel) return dependency;
+  tl.AddTask(dependency, TF(SendBoundBufs<BoundaryType::flxcor_send>), md);
+  auto receive =
+      tl.AddTask(dependency, TF(ReceiveBoundBufs<BoundaryType::flxcor_recv>), md);
+  return tl.AddTask(receive, TF(SetBounds<BoundaryType::flxcor_recv>), md);
+}
 } // namespace parthenon

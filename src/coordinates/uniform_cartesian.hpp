@@ -1,5 +1,5 @@
 //========================================================================================
-// (C) (or copyright) 2023. Triad National Security, LLC. All rights reserved.
+// (C) (or copyright) 2023-2024. Triad National Security, LLC. All rights reserved.
 //
 // This program was produced under U.S. Government contract 89233218CNA000001 for Los
 // Alamos National Laboratory (LANL), which is operated by Triad National Security, LLC
@@ -164,18 +164,11 @@ class UniformCartesian {
 
   template <int dir, TopologicalElement el>
   KOKKOS_FORCEINLINE_FUNCTION Real X(const int idx) const {
-    using TE = TopologicalElement;
-    [[maybe_unused]] bool constexpr X1EDGE =
-        el == TE::F1 || el == TE::E2 || el == TE::E3 || el == TE::NN;
-    [[maybe_unused]] bool constexpr X2EDGE =
-        el == TE::F2 || el == TE::E3 || el == TE::E1 || el == TE::NN;
-    [[maybe_unused]] bool constexpr X3EDGE =
-        el == TE::F3 || el == TE::E1 || el == TE::E2 || el == TE::NN;
-    if constexpr (dir == X1DIR && X1EDGE) {
+    if constexpr (dir == X1DIR && TopologicalOffsetI(el)) {
       return xmin_[dir - 1] + idx * dx_[dir - 1]; // idx - 1/2
-    } else if constexpr (dir == X2DIR && X2EDGE) {
+    } else if constexpr (dir == X2DIR && TopologicalOffsetJ(el)) {
       return xmin_[dir - 1] + idx * dx_[dir - 1]; // idx - 1/2
-    } else if constexpr (dir == X3DIR && X3EDGE) {
+    } else if constexpr (dir == X3DIR && TopologicalOffsetK(el)) {
       return xmin_[dir - 1] + idx * dx_[dir - 1]; // idx - 1/2
     } else {
       return xmin_[dir - 1] + (idx + 0.5) * dx_[dir - 1]; // idx
@@ -270,6 +263,52 @@ class UniformCartesian {
       return dx_[X3DIR - 1];
     } else if constexpr (el == TE::NN) {
       return 1.0;
+    }
+    PARTHENON_FAIL("If you reach this point, someone has added a new value to the the "
+                   "TopologicalElement enum.");
+    return 0.0;
+  }
+
+  template <class... Args>
+  KOKKOS_FORCEINLINE_FUNCTION Real Volume(CellLevel cl, TopologicalElement el,
+                                          Args... args) const {
+    using TE = TopologicalElement;
+    if (cl == CellLevel::same) {
+      if (el == TE::CC) {
+        return cell_volume_;
+      } else if (el == TE::F1) {
+        return area_[X1DIR - 1];
+      } else if (el == TE::F2) {
+        return area_[X2DIR - 1];
+      } else if (el == TE::F3) {
+        return area_[X3DIR - 1];
+      } else if (el == TE::E1) {
+        return dx_[X1DIR - 1];
+      } else if (el == TE::E2) {
+        return dx_[X2DIR - 1];
+      } else if (el == TE::E3) {
+        return dx_[X3DIR - 1];
+      } else if (el == TE::NN) {
+        return 1.0;
+      }
+    } else if (cl == CellLevel::fine) {
+      if (el == TE::CC) {
+        return cell_volume_ / 8.0;
+      } else if (el == TE::F1) {
+        return area_[X1DIR - 1] / 4.0;
+      } else if (el == TE::F2) {
+        return area_[X2DIR - 1] / 4.0;
+      } else if (el == TE::F3) {
+        return area_[X3DIR - 1] / 4.0;
+      } else if (el == TE::E1) {
+        return dx_[X1DIR - 1] / 2.0;
+      } else if (el == TE::E2) {
+        return dx_[X2DIR - 1] / 2.0;
+      } else if (el == TE::E3) {
+        return dx_[X3DIR - 1] / 2.0;
+      } else if (el == TE::NN) {
+        return 1.0;
+      }
     }
     PARTHENON_FAIL("If you reach this point, someone has added a new value to the the "
                    "TopologicalElement enum.");

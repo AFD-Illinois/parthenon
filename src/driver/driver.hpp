@@ -27,7 +27,7 @@
 #include "mesh/mesh.hpp"
 #include "outputs/outputs.hpp"
 #include "parameter_input.hpp"
-#include "tasks/task_list.hpp"
+#include "tasks/tasks.hpp"
 
 namespace parthenon {
 
@@ -90,7 +90,7 @@ class EvolutionDriver : public Driver {
   void PostExecute(DriverStatus status) override;
 
  private:
-  void InitializeBlockTimeStepsAndBoundaries();
+  void InitializeBlockTimeSteps();
 };
 
 namespace DriverUtils {
