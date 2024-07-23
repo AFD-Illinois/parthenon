@@ -1034,6 +1034,7 @@ par_reduce_inner(team_mbr_t team_member, const int il, const int iu, const Funct
         function(i, lreduce);
       },
       reduction);
+}
 
 // reused from kokoks/core/perf_test/PerfTest_ExecSpacePartitioning.cpp
 // commit a0d011fb30022362c61b3bb000ae3de6906cb6a7

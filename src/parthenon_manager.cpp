@@ -191,7 +191,6 @@ void ParthenonManager::ParthenonInitPackagesAndMesh(
   } else if (arg.res_flag == 0) {
     pmesh =
         std::make_unique<Mesh>(pinput.get(), app_input.get(), packages, arg.mesh_flag);
-    pmesh->analysis_flag = false;
   } else {
     // Open restart file
     // Read Mesh from restart file and create meshblocks
@@ -215,12 +214,6 @@ void ParthenonManager::ParthenonInitPackagesAndMesh(
     // close hdf5 file to prevent HDF5 hangs and corrupted files
     // if code dies after restart
     restartReader = nullptr;
-
-    if (arg.analysis_flag == 1) {
-      pmesh->analysis_flag = true;
-    } else {
-      pmesh->analysis_flag = false;
-    }
   }
 
   // add root_level to all max_level
@@ -296,7 +289,7 @@ void ParthenonManager::RestartPackages(Mesh &rm, RestartReader &resfile) {
   }
 
   // Allocate space based on largest vector
-  int max_blocksize = 0;
+  int max_vlen = 1;
   int num_sparse = 0;
   size_t nCells = 1;
   for (const auto &v_info : all_vars_info) {
@@ -313,7 +306,6 @@ void ParthenonManager::RestartPackages(Mesh &rm, RestartReader &resfile) {
                                "Dense field " + label +
                                    " is marked as sparse in restart file");
     }
-
     max_vlen = std::max(max_vlen, v_info.num_components);
     IndexRange out_ib = v_info.cellbounds.GetBoundsI(theDomain);
     IndexRange out_jb = v_info.cellbounds.GetBoundsJ(theDomain);
@@ -362,13 +354,7 @@ void ParthenonManager::RestartPackages(Mesh &rm, RestartReader &resfile) {
           pmb->meshblock_data.Get()->GetVarPtr(label)->dealloc_count = dealloc_count;
         } else {
           // nothing to read for this block, advance reading index
-          const int te_length = (v_info->metadata().Where() == MetadataFlag(Metadata::Face) ||
-                                v_info->metadata().Where() == MetadataFlag(Metadata::Edge)) ? rm.ndim : 1;
-          const int te_offset = (v_info->metadata().Where() == MetadataFlag(Metadata::Face) ||
-                              v_info->metadata().Where() == MetadataFlag(Metadata::Edge) ||
-                              v_info->metadata().Where() == MetadataFlag(Metadata::Node)) ? 1 : 0;
-          const int nPoints = (bsize[0] + te_offset) * (bsize[1] + te_offset) * (bsize[2] + te_offset);
-          index += nPoints * vlen * te_length;
+          index += nCells * vlen;
           continue;
         }
       }
