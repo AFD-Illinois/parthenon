@@ -313,7 +313,6 @@ void ParthenonManager::RestartPackages(Mesh &rm, RestartReader &resfile) {
                                "Dense field " + label +
                                    " is marked as sparse in restart file");
     }
-
     max_vlen = std::max(max_vlen, v_info.num_components);
     IndexRange out_ib = v_info.cellbounds.GetBoundsI(theDomain);
     IndexRange out_jb = v_info.cellbounds.GetBoundsJ(theDomain);

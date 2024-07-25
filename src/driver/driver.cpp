@@ -82,7 +82,6 @@ DriverStatus EvolutionDriver::Execute() {
   OutputSignal signal = pinput->GetBoolean("parthenon/job", "run_only_analysis")
                             ? OutputSignal::analysis
                             : OutputSignal::none;
-
   pouts->MakeOutputs(pmesh, pinput, &tm, signal);
   pmesh->mbcnt = 0;
   int perf_cycle_offset =

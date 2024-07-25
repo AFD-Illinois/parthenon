@@ -308,8 +308,7 @@ void PHDF5Output::WriteOutputFileImpl(Mesh *pm, ParameterInput *pin, SimTime *tm
   }
 
   using OutT = typename std::conditional<WRITE_SINGLE_PRECISION, float, Real>::type;
-  // TODO(BSP) why does this need padding?
-  std::vector<OutT> tmpData(varSize_max * num_blocks_local * 2);
+  std::vector<OutT> tmpData(varSize_max * num_blocks_local);
 
   // for each variable we write
   for (auto &vinfo : all_vars_info) {

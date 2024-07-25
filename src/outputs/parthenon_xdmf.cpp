@@ -144,7 +144,6 @@ void genXDMF(std::string hdfFile, Mesh *pm, SimTime *tm, IndexDomain domain, int
       } else {
         PARTHENON_FAIL("Custom coordinates not supported in XDMF for 1D meshes.");
       }
-
     } else {
       mesh_type = "3DRectMesh";
       dimstring = StringPrintf("%d %d %d", nx3 + n3_offset, nx2 + n2_offset, nx1 + 1);
