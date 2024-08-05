@@ -183,7 +183,7 @@ class RestartReader {
       count[3] = bsize[1];
       count[4] = bsize[0];
       total_dim = 5;
-    } else if (file_output_format_version == HDF5::OUTPUT_VERSION_FORMAT) {
+    } else { //else if (file_output_format_version == HDF5::OUTPUT_VERSION_FORMAT) {
       count[0] = static_cast<hsize_t>(range.e - range.s + 1);
       const int ndim = shape.size();
       if (where == MetadataFlag(Metadata::Cell)) {
@@ -219,9 +219,9 @@ class RestartReader {
       } else {
         PARTHENON_THROW("Variable defined at unknown location!");
       }
-    } else {
-      PARTHENON_THROW("Unknown output format version in restart file.")
-    }
+    } //else {
+    //  PARTHENON_THROW("Unknown output format version in restart file.")
+    //}
 
     hsize_t total_count = 1;
     for (int i = 0; i < total_dim; ++i) {

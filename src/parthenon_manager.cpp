@@ -377,8 +377,8 @@ void ParthenonManager::RestartPackages(Mesh &rm, RestartReader &resfile) {
             }
           }
         }
-      } else if (file_output_format_ver == 2 ||
-                 file_output_format_ver == HDF5::OUTPUT_VERSION_FORMAT) {
+      } else { //if (file_output_format_ver == 2 ||
+              //   file_output_format_ver == HDF5::OUTPUT_VERSION_FORMAT) {
           MetadataFlag where = v_info->metadata().Where();
           // Face/Edge fields add an index in front of t,u,v so we handle them out here
           if (where == MetadataFlag(Metadata::Face) || where == MetadataFlag(Metadata::Edge)) {
@@ -430,9 +430,9 @@ void ParthenonManager::RestartPackages(Mesh &rm, RestartReader &resfile) {
               }
             }
           }
-      } else {
-        PARTHENON_THROW("Unknown output format version in restart file.")
-      }
+      } //else {
+      //  PARTHENON_THROW("Unknown output format version in restart file.")
+      //}
 
       v->data.DeepCopy(v_h);
     }
